@@ -94,7 +94,7 @@ where
     ) -> Result<KeyPackageGeneration, MlsError> {
         let (init_secret_key, public_init) = self
             .cipher_suite_provider
-            .kem_generate()
+            .ukem_generate()
             .await
             .map_err(|e| MlsError::CryptoProviderError(e.into_any_error()))?;
 

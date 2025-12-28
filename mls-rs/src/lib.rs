@@ -179,6 +179,11 @@ pub mod mls_rules {
 
 pub use mls_rs_core::extension::{Extension, ExtensionList};
 
+#[cfg(feature = "upke")]
+pub mod upke {
+    pub use mls_rs_core::upke::*;
+}
+
 pub use crate::{
     client::Client,
     group::{

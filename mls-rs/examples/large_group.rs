@@ -13,6 +13,15 @@ use mls_rs::{
     CipherSuite, CipherSuiteProvider, Client, CryptoProvider, Group,
 };
 
+// UPKE/UKEM demo (parallel to MLS KEM). Enable with `--features upke`.
+#[cfg(feature = "upke")]
+use mls_rs::upke::{
+    upke_keygen, upke_upd_pk, upke_upd_sk, upke_validate_pair, UpkeUpdate, UpkeUpdatesExt,
+};
+
+#[cfg(feature = "upke")]
+use rand_core::OsRng;
+
 const CIPHERSUITE: CipherSuite = CipherSuite::CURVE25519_AES128;
 const GROUP_SIZES: [usize; 8] = [2, 3, 5, 9, 17, 33, 65, 129];
 
@@ -168,25 +177,33 @@ fn make_name(i: usize) -> String {
     format!("bob {i:08}")
 }
 
+fn demo_upke<P: CryptoProvider + Clone>(crypto_provider: &P) {
+    println!("\n--- UPKE demo (carried via GroupContextExtensions in a Commit) ---");
+
+    // Build a small group with 3 members so we can easily demonstrate an update.
+    
+    
+}
+
 fn main() -> Result<(), MlsError> {
     let crypto_provider = mls_rs_crypto_openssl::OpensslCryptoProvider::default();
 
     println!("Demonstrate that performance depends on a) group evolution and b) a members position in the tree.\n");
+    let mut groups = make_groups_best_case(10, &crypto_provider)?;
 
-    let (small_bench_bc, large_bench_bc) = bench_commit_size(Case::Best, &crypto_provider)?;
-    let (small_bench_wc, large_bench_wc) = bench_commit_size(Case::Worst, &crypto_provider)?;
+    let group = &mut groups[0];
 
-    println!("\nBest case a), worst case b) : commit size is θ(log(n)) bytes.");
-    println!("group sizes n :\n{GROUP_SIZES:?}\ncommit sizes :\n{large_bench_bc:?}");
+    println!("Group created with 10 members.");
+    println!("Epoch: {}", group.current_epoch());
 
-    println!("\nWorst case a), worst case b) : commit size is θ(n) bytes.");
-    println!("group sizes n :\n{GROUP_SIZES:?}\ncommit sizes :\n{large_bench_wc:?}");
-
-    println!(
-        "\nBest case b) : if n-1 is a power of 2, commit size is θ(1) bytes, independent of a)."
-    );
-    println!("group sizes n :\n{GROUP_SIZES:?}\ncommit sizes, best case a) :\n{small_bench_bc:?}");
-    println!("commit sizes, worst case a) :\n{small_bench_wc:?}");
+    // 2) Print roster and each member's HPKE public key from the ratchet tree.
+    // We do not rely on private internal fields; we use public APIs:
+    // - roster().member_with_index()
+    // - member.encryption_key() (public accessor from roster member object)
+    let index = group.current_member_index();
+    println!("\nMembers and HPKE public keys:, {} ", index);
+    println!("\nPublic key roster():, {:?} ", group.roster());
+    
 
     Ok(())
 }

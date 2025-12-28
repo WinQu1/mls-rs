@@ -71,7 +71,7 @@ impl LeafNode {
         CSP: CipherSuiteProvider,
     {
         let (secret_key, public_key) = cipher_suite_provider
-            .kem_generate()
+            .ukem_generate()
             .await
             .map_err(|e| MlsError::CryptoProviderError(e.into_any_error()))?;
 
@@ -108,7 +108,7 @@ impl LeafNode {
         signer: &SignatureSecretKey,
     ) -> Result<HpkeSecretKey, MlsError> {
         let (secret, public) = cipher_suite_provider
-            .kem_generate()
+            .ukem_generate()
             .await
             .map_err(|e| MlsError::CryptoProviderError(e.into_any_error()))?;
 
@@ -149,7 +149,7 @@ impl LeafNode {
         signer: &SignatureSecretKey,
     ) -> Result<HpkeSecretKey, MlsError> {
         let (secret, public) = cipher_suite_provider
-            .kem_generate()
+            .ukem_generate()
             .await
             .map_err(|e| MlsError::CryptoProviderError(e.into_any_error()))?;
 

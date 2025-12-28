@@ -15,6 +15,8 @@ use zeroize::{ZeroizeOnDrop, Zeroizing};
 mod cipher_suite;
 pub use self::cipher_suite::*;
 
+pub mod upke;
+
 #[cfg(feature = "test_suite")]
 pub mod test_suite;
 
@@ -462,6 +464,9 @@ pub trait CipherSuiteProvider: Send + Sync {
     /// and [hpke_open](CipherSuiteProvider::hpke_open).
     async fn kem_generate(&self) -> Result<(HpkeSecretKey, HpkePublicKey), Self::Error>;
 
+    async fn ukem_generate(&self) -> Result<(UpkeSecretKey, UpkePublicKey), Self::Error>;
+
+
     /// Verify that the given byte vector `key` can be decoded as an HPKE public key.
     fn kem_public_key_validate(&self, key: &HpkePublicKey) -> Result<(), Self::Error>;
 
@@ -504,3 +509,127 @@ pub trait CipherSuiteProvider: Send + Sync {
         data: &[u8],
     ) -> Result<(), Self::Error>;
 }
+
+
+/// Your UPKE scheme may encode structured elements such as (g1..gℓ, h).
+/// This wrapper stores the canonical byte encoding of that structure.
+#[derive(Clone, PartialEq, Eq, MlsSize, MlsEncode, MlsDecode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+/// Ciphertext produced by [`CipherSuiteProvider::hpke_seal`]
+pub struct UpkeCiphertext {
+    #[mls_codec(with = "mls_rs_codec::byte_vec")]
+    #[cfg_attr(feature = "serde", serde(with = "crate::vec_serde"))]
+    pub kem_output: Vec<u8>,
+    #[mls_codec(with = "mls_rs_codec::byte_vec")]
+    #[cfg_attr(feature = "serde", serde(with = "crate::vec_serde"))]
+    pub ciphertext: Vec<u8>,
+}
+
+impl Debug for UpkeCiphertext {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpkeCiphertext").finish()
+    }
+}
+
+/// Byte representation of an HPKE public key. For ciphersuites using elliptic curves,
+/// the public key should be represented in the uncompressed format.
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, MlsSize, MlsDecode, MlsEncode)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct UpkePublicKey(
+    #[mls_codec(with = "mls_rs_codec::byte_vec")]
+    #[cfg_attr(feature = "serde", serde(with = "crate::vec_serde"))]
+    Vec<u8>,
+);
+
+impl Debug for UpkePublicKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        crate::debug::pretty_bytes(&self.0)
+            .named("UpkePublicKey")
+            .fmt(f)
+    }
+}
+
+impl From<Vec<u8>> for UpkePublicKey {
+    fn from(data: Vec<u8>) -> Self {
+        Self(data)
+    }
+}
+
+impl From<UpkePublicKey> for Vec<u8> {
+    fn from(data: UpkePublicKey) -> Self {
+        data.0
+    }
+}
+
+impl Deref for UpkePublicKey {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for UpkePublicKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+/// Byte representation of an HPKE secret key.
+#[derive(Clone, PartialEq, Eq, MlsSize, MlsEncode, MlsDecode, ZeroizeOnDrop)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub struct UpkeSecretKey(
+    #[mls_codec(with = "mls_rs_codec::byte_vec")]
+    #[cfg_attr(feature = "serde", serde(with = "crate::vec_serde"))]
+    Vec<u8>,
+);
+
+impl Debug for UpkeSecretKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("UpkeSecretKey").finish()
+    }
+}
+
+impl From<Vec<u8>> for UpkeSecretKey {
+    fn from(data: Vec<u8>) -> Self {
+        Self(data)
+    }
+}
+
+impl From<UpkeSecretKey> for Vec<u8> {
+    fn from(data: UpkeSecretKey) -> Self {
+        data.0.to_vec()
+    }
+}
+
+impl Deref for UpkeSecretKey {
+    type Target = [u8];
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl AsRef<[u8]> for UpkeSecretKey {
+    fn as_ref(&self) -> &[u8] {
+        &self.0
+    }
+}
+
+#[derive(Clone, PartialEq, Eq, MlsSize, MlsEncode, MlsDecode, ZeroizeOnDrop)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+
+pub struct UpkeUpdateToken(
+    #[mls_codec(with = "mls_rs_codec::byte_vec")]
+    #[cfg_attr(feature = "serde", serde(with = "crate::vec_serde"))]
+    Vec<u8>,
+);
+
+impl Debug for UpkeUpdateToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        crate::debug::pretty_bytes(&self.0)
+            .named("UpkeUpdateToken")
+            .fmt(f)
+    }
+}
+

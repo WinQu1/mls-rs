@@ -8,6 +8,7 @@ pub mod ec_signer;
 pub mod ecdh;
 pub mod kdf;
 pub mod mac;
+pub mod upke;
 
 #[cfg(feature = "x509")]
 pub mod x509;
@@ -31,7 +32,7 @@ use thiserror::Error;
 use mls_rs_core::{
     crypto::{
         CipherSuite, CipherSuiteProvider, CryptoProvider, HpkeCiphertext, HpkePublicKey,
-        HpkeSecretKey, SignaturePublicKey, SignatureSecretKey,
+        HpkeSecretKey, SignaturePublicKey, SignatureSecretKey, UpkePublicKey, UpkeSecretKey,
     },
     error::{AnyError, IntoAnyError},
 };
@@ -150,6 +151,10 @@ where
             hpke,
             ec_signer: EcSigner::new(cipher_suite)?,
         })
+    }
+
+    async fn upke_generate_impl(&self) -> Result<(UpkeSecretKey, UpkePublicKey), OpensslCryptoError> {
+        crate::upke::generate_keypair(self).map_err(Into::into)
     }
 
     pub fn random_bytes(&self, out: &mut [u8]) -> Result<(), OpensslCryptoError> {
@@ -316,6 +321,10 @@ where
     async fn kem_generate(&self) -> Result<(HpkeSecretKey, HpkePublicKey), Self::Error> {
         Ok(self.hpke.generate().await?)
     }
+    async fn ukem_generate(&self) -> Result<(UpkeSecretKey, UpkePublicKey), Self::Error> {
+        self.upke_generate_impl().await
+   }
+
 
     fn kem_public_key_validate(&self, key: &HpkePublicKey) -> Result<(), Self::Error> {
         Ok(self.hpke.public_key_validate(key)?)

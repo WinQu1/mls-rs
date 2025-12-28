@@ -234,6 +234,66 @@ where
         Ok(self)
     }
 
+    /// Add (or replace) a UPKE key update destined for `target_leaf`.
+    ///
+    /// This is implemented as a `GroupContextExtensions` proposal carried inside
+    /// the commit, which updates a custom `UpkeUpdatesExt` extension.
+    ///
+    /// Note: This does not store any derived UPKE secret locally; the application
+    /// should apply the update using [`mls_rs_core::upke::upke_upd_sk`] after
+    /// processing the commit.
+    #[cfg(feature = "upke")]
+    pub fn add_upke_update(
+        mut self,
+        update: mls_rs_core::upke::UpkeUpdate,
+    ) -> Result<Self, MlsError> {
+        use mls_rs_core::extension::ExtensionError;
+        use mls_rs_core::upke::UpkeUpdatesExt;
+
+        // Start from the current group context extensions.
+        let mut new_ext = self.group.context().extensions.clone();
+
+        // If this builder already contains a GroupContextExtensions proposal,
+        // base our update on it (and replace it with a single updated proposal).
+        if let Some((idx, existing)) = self
+            .proposals
+            .iter()
+            .enumerate()
+            .find_map(|(i, p)| match p {
+                crate::group::proposal::Proposal::GroupContextExtensions(e) => Some((i, e.clone())),
+                _ => None,
+            })
+        {
+            new_ext = existing;
+            self.proposals.remove(idx);
+        }
+
+        // Decode prior UpkeUpdatesExt (if any), replace/insert this update.
+        let mut upke_updates = match new_ext.get_as::<UpkeUpdatesExt>() {
+            Ok(Some(ext)) => ext,
+            Ok(None) => UpkeUpdatesExt { updates: Vec::new() },
+            Err(e) => {
+                return Err(MlsError::ExtensionError(e.into_any_error()));
+            }
+        };
+
+        if let Some(found) = upke_updates
+            .updates
+            .iter_mut()
+            .find(|u| u.target_leaf == update.target_leaf)
+        {
+            *found = update;
+        } else {
+            upke_updates.updates.push(update);
+        }
+
+        new_ext
+            .set_from(upke_updates)
+            .map_err(|e: ExtensionError| MlsError::ExtensionError(e.into_any_error()))?;
+
+        self.set_group_context_ext(new_ext)
+    }
+
     /// Insert a
     /// [`PreSharedKeyProposal`](crate::group::proposal::PreSharedKeyProposal) with
     /// an external PSK into the current commit that is being built.
@@ -1016,6 +1076,12 @@ mod tests {
 
     use super::*;
 
+    #[cfg(feature = "upke")]
+    use mls_rs_core::upke::{
+        upke_keygen, upke_upd_pk, upke_upd_sk, upke_validate_pair, UpkeUpdate,
+        UpkeUpdatesExt,
+    };
+
     #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
     async fn test_commit_builder_group() -> Group<TestClientConfig> {
         test_group_custom_config(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, |b| {
@@ -1783,5 +1849,64 @@ mod tests {
         assert!(group.pending_commit.is_none());
         group.apply_detached_commit(secrets).await.unwrap();
         assert_eq!(group.context().epoch, 1);
+    }
+}
+
+#[cfg(all(test, feature = "upke"))]
+mod upke_commit_integration_tests {
+    use super::*;
+    use crate::client::test_utils::{TEST_CIPHER_SUITE, TEST_PROTOCOL_VERSION};
+    use crate::group::test_utils::{process_commit, test_n_member_group};
+    use mls_rs_core::upke::{
+        upke_keygen, upke_upd_pk, upke_upd_sk, upke_validate_pair, UpkeUpdate, UpkeUpdatesExt,
+    };
+    use rand_core::OsRng;
+
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn upke_update_carried_in_commit_group_context_extension() {
+        let mut rng = OsRng;
+        let mut groups = test_n_member_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, 2).await;
+
+            // group[0] is initiator, group[1] is recipient.
+            let (sk1, pk1) = upke_keygen(&mut rng);
+            assert!(upke_validate_pair(&sk1, &pk1).unwrap());
+
+            // Initiator updates recipient's public key.
+            let (up, pk2) = upke_upd_pk(&mut rng, &pk1).unwrap();
+
+            let update = UpkeUpdate {
+                target_leaf: groups[1].current_member_index(),
+                key_id: 1,
+                new_public_key: pk2.clone(),
+                update_token: up.clone(),
+            };
+
+            let commit_output = groups[0]
+                .commit_builder()
+                .add_upke_update(update)
+                .unwrap()
+                .build()
+                .await
+                .unwrap();
+
+            let commit_msg = commit_output.commit_message;
+            process_commit(&mut groups, commit_msg, groups[0].current_member_index()).await;
+
+            // Recipient reads extension from updated group context.
+            let ext = groups[1]
+                .context()
+                .extensions
+                .get_as::<UpkeUpdatesExt>()
+                .unwrap()
+                .expect("UPKE updates ext missing");
+
+            let upd = ext
+                .updates
+                .iter()
+                .find(|u| u.target_leaf == groups[1].current_member_index())
+                .expect("no update for recipient");
+
+            let sk2 = upke_upd_sk(&sk1, &upd.update_token).unwrap();
+        assert!(upke_validate_pair(&sk2, &upd.new_public_key).unwrap());
     }
 }

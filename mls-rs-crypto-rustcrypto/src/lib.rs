@@ -335,6 +335,10 @@ where
         Ok(self.hpke.generate().await?)
     }
 
+     async fn ukem_generate(&self) -> Result<(UpkeSecretKey, UpkePublicKey), Self::Error> {
+        Ok(self.hpke.generate().await?)
+    }
+
     fn kem_public_key_validate(&self, key: &HpkePublicKey) -> Result<(), Self::Error> {
         Ok(self.hpke.public_key_validate(key)?)
     }

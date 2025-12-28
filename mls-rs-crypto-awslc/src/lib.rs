@@ -8,6 +8,7 @@ mod ecdsa;
 mod hmac;
 mod kdf;
 mod kem;
+pub mod upke;
 
 pub mod x509;
 
@@ -27,7 +28,7 @@ use crate::aws_lc_sys_impl::SHA256;
 use mls_rs_core::{
     crypto::{
         CipherSuite, CipherSuiteProvider, CryptoProvider, HpkeCiphertext, HpkePublicKey,
-        HpkeSecretKey, SignaturePublicKey, SignatureSecretKey,
+        HpkeSecretKey, SignaturePublicKey, SignatureSecretKey, UpkePublicKey, UpkeSecretKey,
     },
     error::{AnyError, IntoAnyError},
 };
@@ -98,6 +99,9 @@ impl AwsLcCipherSuite {
         bytes: &[u8],
     ) -> Result<SignaturePublicKey, AwsLcCryptoError> {
         self.signing.import_ec_der_public_key(bytes)
+    }
+    async fn upke_generate_impl(&self) -> Result<(UpkeSecretKey, UpkePublicKey), AwsLcCryptoError> {
+        crate::upke::generate_keypair_from_provider_random(|out| self.random_bytes(out))
     }
 }
 
@@ -595,6 +599,10 @@ impl CipherSuiteProvider for AwsLcCipherSuite {
         }
         .await
         .map_err(Into::into)
+    }
+
+    async fn ukem_generate(&self) -> Result<(UpkeSecretKey, UpkePublicKey), Self::Error> {
+       self.upke_generate_impl().await
     }
 
     fn kem_public_key_validate(&self, key: &HpkePublicKey) -> Result<(), Self::Error> {
