@@ -49,24 +49,31 @@ impl UpkeSecretKey {
 
 impl UpkePublicKey {
     pub fn parse(&self) -> Result<([RistrettoPoint; UPKE_L], RistrettoPoint), UpkeError> {
-        if self.g.len() != 32 * UPKE_L || self.h.len() != 32 {
+        let b = self.as_ref(); // UpkePublicKey(Vec<u8>) implements AsRef<[u8]>
+        let expected = (UPKE_L + 1) * 32;
+
+        if b.len() != expected {
             return Err(UpkeError::InvalidLength);
         }
 
         let mut gs: [RistrettoPoint; UPKE_L] = [RISTRETTO_BASEPOINT_POINT; UPKE_L];
 
-        for (i, chunk) in self.g.chunks_exact(32).enumerate() {
-            let mut b = [0u8; 32];
-            b.copy_from_slice(chunk);
-            let p = CompressedRistretto(b)
+        for i in 0..UPKE_L {
+            let start = i * 32;
+            let end = start + 32;
+            let mut arr = [0u8; 32];
+            arr.copy_from_slice(&b[start..end]);
+
+            gs[i] = CompressedRistretto(arr)
                 .decompress()
                 .ok_or(UpkeError::InvalidPoint)?;
-            gs[i] = p;
         }
 
-        let mut hb = [0u8; 32];
-        hb.copy_from_slice(&self.h);
-        let h = CompressedRistretto(hb)
+        let h_start = UPKE_L * 32;
+        let mut harr = [0u8; 32];
+        harr.copy_from_slice(&b[h_start..h_start + 32]);
+
+        let h = CompressedRistretto(harr)
             .decompress()
             .ok_or(UpkeError::InvalidPoint)?;
 
@@ -110,35 +117,6 @@ impl crate::extension::MlsCodecExtension for UpkeUpdatesExt {
     }
 }
 
-/// Generate a fresh UPKE keypair.
-pub fn upke_keygen<R: RngCore + CryptoRng>(rng: &mut R) -> (UpkeSecretKey, UpkePublicKey) {
-    let mut s: [Scalar; UPKE_L] = [Scalar::ZERO; UPKE_L];
-    let mut gs: [RistrettoPoint; UPKE_L] = [RISTRETTO_BASEPOINT_POINT; UPKE_L];
-
-    for i in 0..UPKE_L {
-        // Match the diagram: s_i in {0,1}.
-        let bit = (rng.next_u32() & 1) as u64;
-        s[i] = Scalar::from(bit);
-        gs[i] = RistrettoPoint::random(rng);
-    }
-
-    let mut h = RistrettoPoint::default();
-    for i in 0..UPKE_L {
-        h += gs[i] * s[i];
-    }
-
-    let mut g_bytes = Vec::with_capacity(32 * UPKE_L);
-    for i in 0..UPKE_L {
-        g_bytes.extend_from_slice(gs[i].compress().as_bytes());
-    }
-
-    let pk = UpkePublicKey {
-        g: g_bytes,
-        h: h.compress().as_bytes().to_vec(),
-    };
-
-    (UpkeSecretKey { s }, pk)
-}
 
 /// Encrypt a group element `m` under `pk`.
 pub fn upke_enc<R: RngCore + CryptoRng>(

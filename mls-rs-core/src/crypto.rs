@@ -616,20 +616,7 @@ impl AsRef<[u8]> for UpkeSecretKey {
     }
 }
 
-#[derive(Clone, PartialEq, Eq, MlsSize, MlsEncode, MlsDecode, ZeroizeOnDrop)]
+#[derive(Clone, PartialEq, Eq, MlsSize, MlsEncode, MlsDecode)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 
-pub struct UpkeUpdateToken(
-    #[mls_codec(with = "mls_rs_codec::byte_vec")]
-    #[cfg_attr(feature = "serde", serde(with = "crate::vec_serde"))]
-    Vec<u8>,
-);
-
-impl Debug for UpkeUpdateToken {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        crate::debug::pretty_bytes(&self.0)
-            .named("UpkeUpdateToken")
-            .fmt(f)
-    }
-}
-
+pub struct UpkeUpdateToken(pub Vec<UpkeCiphertext>);

@@ -602,7 +602,7 @@ impl CipherSuiteProvider for AwsLcCipherSuite {
     }
 
     async fn ukem_generate(&self) -> Result<(UpkeSecretKey, UpkePublicKey), Self::Error> {
-       self.upke_generate_impl().await
+        self.upke_generate_impl().await
     }
 
     fn kem_public_key_validate(&self, key: &HpkePublicKey) -> Result<(), Self::Error> {

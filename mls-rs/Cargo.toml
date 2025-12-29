@@ -39,9 +39,6 @@ self_remove_proposal = ["mls-rs-core/self_remove_proposal"]
 export_key_generation = []
 gsma_rcs_e2ee_feature = ["mls-rs-core/gsma_rcs_e2ee_feature"]
 
-# DDH-based UPKE / UKEM utilities (parallel to MLS KEM)
-upke = ["mls-rs-core/upke"]
-
 std = ["mls-rs-core/std", "mls-rs-codec/std", "mls-rs-identity-x509?/std", "hex/std", "futures/std", "itertools/use_std", "safer-ffi-gen?/std", "zeroize/std", "dep:debug_tree", "dep:thiserror", "serde?/std", "subtle/std"]
 
 ffi = ["dep:safer-ffi", "dep:safer-ffi-gen", "mls-rs-core/ffi"]
@@ -86,6 +83,7 @@ hex = { version = "^0.4.3", default-features = false, features = ["serde", "allo
 
 # Only for benchmarks
 mls-rs-crypto-awslc = { path = "../mls-rs-crypto-awslc", optional = true, version = "0.20" }
+curve25519-dalek = "4.1.3"
 
 # Async mode dependencies
 [target.'cfg(mls_build_async)'.dependencies]

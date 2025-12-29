@@ -154,7 +154,7 @@ where
     }
 
     async fn upke_generate_impl(&self) -> Result<(UpkeSecretKey, UpkePublicKey), OpensslCryptoError> {
-        crate::upke::generate_keypair(self).map_err(Into::into)
+        crate::upke::generate_keypair_from_provider_random(|out| self.random_bytes(out))
     }
 
     pub fn random_bytes(&self, out: &mut [u8]) -> Result<(), OpensslCryptoError> {

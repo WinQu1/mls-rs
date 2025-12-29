@@ -25,9 +25,6 @@ post-quantum = []
 self_remove_proposal = []
 gsma_rcs_e2ee_feature = []
 
-# DDH-based Updatable Public Key Encryption / UKEM (Ristretto255)
-upke = ["dep:curve25519-dalek", "dep:rand_core", "dep:subtle"]
-
 [dependencies]
 mls-rs-codec = { version = "0.7", path = "../mls-rs-codec", default-features = false}
 zeroize = { version = "1", default-features = false, features = ["alloc", "zeroize_derive"] }
@@ -43,9 +40,11 @@ hex = { version = "^0.4.3", default-features = false, features = ["alloc"] }
 itertools = { version = "0.14", optional = true }
 serde_bytes = { version = "0.11", optional = true }
 
-curve25519-dalek = { version = "4", default-features = false, optional = true }
-rand_core = { version = "0.6", default-features = false, features = ["getrandom"], optional = true }
-subtle = { version = "2", default-features = false, optional = true }
+curve25519-dalek = { version = "4", default-features = false, features = ["alloc", "zeroize", "precomputed-tables", "rand_core"] }
+
+rand_core = { version = "0.6", default-features = false, features = ["alloc"]}
+subtle = { version = "2", default-features = false }
+sha2 = "0.10.9"
 
 [target.'cfg(mls_build_async)'.dependencies]
 async-trait = "0.1.74"
