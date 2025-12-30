@@ -4,7 +4,7 @@
 
 use crate::cipher_suite::CipherSuite;
 use crate::client::MlsError;
-use crate::crypto::HpkePublicKey;
+use mls_rs_core::crypto::HpkePublicKey;
 use crate::hash_reference::HashReference;
 use crate::identity::SigningIdentity;
 use crate::protocol_version::ProtocolVersion;

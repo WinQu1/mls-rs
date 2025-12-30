@@ -147,7 +147,7 @@ mod tests {
         {connection_strategy::MemoryStrategy, test_utils::gen_rand_bytes},
     };
     use assert_matches::assert_matches;
-    use mls_rs_core::{crypto::HpkeSecretKey, key_package::KeyPackageData};
+    use mls_rs_core::{crypto::{HpkeSecretKey, UpkeSecretKey}, key_package::KeyPackageData};
 
     fn test_storage() -> SqLiteKeyPackageStorage {
         SqLiteDataStorageEngine::new(MemoryStrategy)
@@ -161,7 +161,7 @@ mod tests {
         let key_package = KeyPackageData::new(
             gen_rand_bytes(256),
             HpkeSecretKey::from(gen_rand_bytes(256)),
-            HpkeSecretKey::from(gen_rand_bytes(256)),
+            UpkeSecretKey::from(gen_rand_bytes(256)),
             123,
         );
 

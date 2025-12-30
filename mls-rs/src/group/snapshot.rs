@@ -4,6 +4,8 @@
 
 use alloc::boxed::Box;
 use alloc::vec::Vec;
+#[cfg(feature = "by_ref_proposal")]
+use mls_rs_core::crypto::{HpkePublicKey, TreeKemPublicKey, TreeKemSecretKey};
 
 use crate::{
     client::MlsError,
@@ -18,7 +20,7 @@ use crate::{
 
 #[cfg(feature = "by_ref_proposal")]
 use crate::{
-    crypto::{HpkePublicKey, HpkeSecretKey},
+    crypto::{HpkeSecretKey},
     group::{
         proposal_cache::{CachedProposal, ProposalCache},
         ProposalMessageDescription, ProposalRef,
@@ -44,7 +46,7 @@ pub(crate) struct Snapshot {
     epoch_secrets: EpochSecrets,
     key_schedule: KeySchedule,
     #[cfg(feature = "by_ref_proposal")]
-    pending_updates: SmallMap<HpkePublicKey, (HpkeSecretKey, Option<SignatureSecretKey>)>,
+    pending_updates: SmallMap<TreeKemPublicKey, (TreeKemSecretKey, Option<SignatureSecretKey>)>,
     pending_commit_snapshot: PendingCommitSnapshot,
     signer: SignatureSecretKey,
 }

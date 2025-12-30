@@ -4,7 +4,6 @@
 use alloc::{vec, vec::Vec};
 
 use mls_rs_codec::{MlsDecode, MlsEncode, MlsSize};
-use mls_rs_core::crypto::HpkeSecretKey;
 
 use crate::{client::MlsError, crypto::CipherSuiteProvider};
 
@@ -15,19 +14,21 @@ use super::{
     TreeKemPublic,
 };
 
+use mls_rs_core::crypto::{HpkeSecretKey, TreeKemSecretKey, UpkeSecretKey};
+
 #[derive(Clone, Debug, MlsEncode, MlsDecode, MlsSize, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct TreeKemPrivate {
     pub self_index: LeafIndex,
-    pub secret_keys: Vec<Option<HpkeSecretKey>>,
+    pub secret_keys: Vec<Option<TreeKemSecretKey>>,
 }
 
 impl TreeKemPrivate {
-    pub fn new_self_leaf(self_index: LeafIndex, leaf_secret: HpkeSecretKey) -> Self {
+    pub fn new_self_leaf(self_index: LeafIndex, leaf_secret: UpkeSecretKey) -> Self {
         TreeKemPrivate {
             self_index,
-            secret_keys: vec![Some(leaf_secret)],
+            secret_keys: vec![Some(TreeKemSecretKey::Upke(leaf_secret))],
         }
     }
 
@@ -79,21 +80,37 @@ impl TreeKemPrivate {
 
             let (secret_key, public_key) = secret.to_hpke_key_pair(cipher_suite_provider).await?;
 
-            if expected_pub_key != &public_key {
+            if expected_pub_key.as_hpke().unwrap() != &public_key {
                 return Err(MlsError::PubKeyMismatch);
             }
 
             // It's ok to use index directly because of the resize above
-            self.secret_keys[i + 1] = Some(secret_key);
+            self.secret_keys[i + 1] = Some(TreeKemSecretKey::Hpke(secret_key));
         }
 
         Ok(())
     }
 
     #[cfg(feature = "by_ref_proposal")]
-    pub fn update_leaf(&mut self, new_leaf: HpkeSecretKey) {
+    pub fn update_leaf(&mut self, new_leaf: TreeKemSecretKey) {
         self.secret_keys = vec![None; self.secret_keys.len()];
         self.secret_keys[0] = Some(new_leaf);
+    }
+}
+
+impl TreeKemPrivate {
+    pub fn leaf_upke(&self) -> Option<&UpkeSecretKey> {
+        match self.secret_keys.get(0).and_then(|x| x.as_ref()) {
+            Some(TreeKemSecretKey::Upke(sk)) => Some(sk),
+            _ => None,
+        }
+    }
+
+    pub fn node_hpke(&self, idx: usize) -> Option<&HpkeSecretKey> {
+        match self.secret_keys.get(idx).and_then(|x| x.as_ref()) {
+            Some(TreeKemSecretKey::Hpke(sk)) => Some(sk),
+            _ => None,
+        }
     }
 }
 

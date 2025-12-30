@@ -356,6 +356,8 @@ pub enum MlsError {
     SelfRemoveAlreadyProposed,
     #[cfg_attr(feature = "std", error("Default value listed"))]
     DefaultValueListed,
+    #[cfg_attr(feature = "std", error(transparent))]
+    CryptoError(AnyError),
 }
 
 impl IntoAnyError for MlsError {

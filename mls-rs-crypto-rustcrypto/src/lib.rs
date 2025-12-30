@@ -33,8 +33,7 @@ use rand_core::{OsRng, RngCore};
 
 use mls_rs_core::{
     crypto::{
-        CipherSuite, CipherSuiteProvider, CryptoProvider, HpkeCiphertext, HpkePublicKey,
-        HpkeSecretKey, SignaturePublicKey, SignatureSecretKey,
+        CipherSuite, CipherSuiteProvider, CryptoProvider, HpkeCiphertext, HpkePublicKey, HpkeSecretKey, SignaturePublicKey, SignatureSecretKey, UpkePublicKey, UpkeSecretKey
     },
     error::{AnyError, IntoAnyError},
 };
@@ -335,8 +334,8 @@ where
         Ok(self.hpke.generate().await?)
     }
 
-     async fn ukem_generate(&self) -> Result<(UpkeSecretKey, UpkePublicKey), Self::Error> {
-        Ok(self.hpke.generate().await?)
+    async fn ukem_generate(&self) -> Result<(UpkeSecretKey, UpkePublicKey), Self::Error> {
+        panic!("Upke generation missing by rust-crypto")
     }
 
     fn kem_public_key_validate(&self, key: &HpkePublicKey) -> Result<(), Self::Error> {

@@ -4,10 +4,11 @@
 
 use super::{parent_hash::ParentHash, Capabilities, Lifetime};
 use crate::client::MlsError;
-use crate::crypto::{CipherSuiteProvider, HpkePublicKey, HpkeSecretKey, SignatureSecretKey};
+use crate::crypto::{CipherSuiteProvider, TreeKemPublicKey, SignatureSecretKey};
+use mls_rs_core::crypto::{TreeKemSecretKey, UpkeSecretKey};
 use crate::{identity::SigningIdentity, signer::Signable, ExtensionList};
 use alloc::vec::Vec;
-use core::fmt::{self, Debug};
+ use core::fmt::{self, Debug};
 use mls_rs_codec::{MlsDecode, MlsEncode, MlsSize};
 use mls_rs_core::error::IntoAnyError;
 
@@ -26,7 +27,7 @@ pub enum LeafNodeSource {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct LeafNode {
-    pub public_key: HpkePublicKey,
+    pub public_key: TreeKemPublicKey,
     pub signing_identity: SigningIdentity,
     pub capabilities: Capabilities,
     pub leaf_node_source: LeafNodeSource,
@@ -66,7 +67,7 @@ impl LeafNode {
         signing_identity: SigningIdentity,
         signer: &SignatureSecretKey,
         lifetime: Lifetime,
-    ) -> Result<(Self, HpkeSecretKey), MlsError>
+    ) -> Result<(Self, TreeKemSecretKey), MlsError>
     where
         CSP: CipherSuiteProvider,
     {
@@ -76,7 +77,7 @@ impl LeafNode {
             .map_err(|e| MlsError::CryptoProviderError(e.into_any_error()))?;
 
         let mut leaf_node = LeafNode {
-            public_key,
+            public_key: TreeKemPublicKey::Upke(public_key),
             signing_identity,
             capabilities: properties.capabilities,
             leaf_node_source: LeafNodeSource::KeyPackage(lifetime),
@@ -94,7 +95,7 @@ impl LeafNode {
             )
             .await?;
 
-        Ok((leaf_node, secret_key))
+        Ok((leaf_node, TreeKemSecretKey::Upke(secret_key)))
     }
 
     #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
@@ -106,13 +107,13 @@ impl LeafNode {
         new_properties: Option<ConfigProperties>,
         signing_identity: Option<SigningIdentity>,
         signer: &SignatureSecretKey,
-    ) -> Result<HpkeSecretKey, MlsError> {
+    ) -> Result<UpkeSecretKey, MlsError> {
         let (secret, public) = cipher_suite_provider
             .ukem_generate()
             .await
             .map_err(|e| MlsError::CryptoProviderError(e.into_any_error()))?;
 
-        self.public_key = public;
+        self.public_key = TreeKemPublicKey::Upke(public);
 
         if let Some(new_properties) = new_properties {
             self.capabilities = new_properties.capabilities;
@@ -147,13 +148,13 @@ impl LeafNode {
         new_properties: Option<ConfigProperties>,
         new_signing_identity: Option<SigningIdentity>,
         signer: &SignatureSecretKey,
-    ) -> Result<HpkeSecretKey, MlsError> {
+    ) -> Result<UpkeSecretKey, MlsError> {
         let (secret, public) = cipher_suite_provider
             .ukem_generate()
             .await
             .map_err(|e| MlsError::CryptoProviderError(e.into_any_error()))?;
 
-        self.public_key = public;
+        self.public_key = TreeKemPublicKey::Upke(public);
 
         if let Some(new_properties) = new_properties {
             self.capabilities = new_properties.capabilities;
@@ -177,7 +178,7 @@ impl LeafNode {
 
 #[derive(Debug)]
 struct LeafNodeTBS<'a> {
-    public_key: &'a HpkePublicKey,
+    public_key: &'a TreeKemPublicKey,
     signing_identity: &'a SigningIdentity,
     capabilities: &'a Capabilities,
     leaf_node_source: &'a LeafNodeSource,

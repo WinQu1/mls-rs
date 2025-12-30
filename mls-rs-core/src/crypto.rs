@@ -43,6 +43,31 @@ impl Debug for HpkeCiphertext {
     }
 }
 
+
+#[repr(u8)]
+#[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, MlsSize, MlsDecode, MlsEncode, Debug)]
+pub enum TreeKemPublicKey {
+    Hpke(HpkePublicKey) = 0,
+    Upke(UpkePublicKey) = 1,
+}
+
+impl TreeKemPublicKey {
+    pub fn as_hpke(&self) -> Option<&HpkePublicKey> {
+        if let TreeKemPublicKey::Hpke(pk) = self { Some(pk) } else { None }
+    }
+
+    pub fn as_upke(&self) -> Option<&UpkePublicKey> {
+        if let TreeKemPublicKey::Upke(pk) = self { Some(pk) } else { None }
+    }
+
+    pub fn as_ref(&self) -> Vec<u8> {
+        match self {
+            TreeKemPublicKey::Hpke(hpke) => hpke.0.clone(),
+            TreeKemPublicKey::Upke(upke) => upke.0.clone(),
+        }
+    }
+}
+
 /// Byte representation of an HPKE public key. For ciphersuites using elliptic curves,
 /// the public key should be represented in the uncompressed format.
 #[derive(Clone, PartialEq, Eq, Hash, PartialOrd, Ord, MlsSize, MlsDecode, MlsEncode)]
@@ -65,6 +90,7 @@ impl Debug for HpkePublicKey {
             .fmt(f)
     }
 }
+
 
 impl From<Vec<u8>> for HpkePublicKey {
     fn from(data: Vec<u8>) -> Self {
@@ -620,3 +646,36 @@ impl AsRef<[u8]> for UpkeSecretKey {
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 
 pub struct UpkeUpdateToken(pub Vec<UpkeCiphertext>);
+
+impl Debug for UpkeUpdateToken {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_tuple("UpkeUpdateToken")
+            .field(&format_args!("<{} ciphertexts>", self.0.len()))
+            .finish()
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, MlsSize, MlsEncode, MlsDecode)]
+pub struct EncryptedPathSecretWithUpke {
+    pub ciphertext: HpkeCiphertext,
+    pub new_public_key: UpkePublicKey,
+    pub update_token: UpkeUpdateToken,
+}
+
+#[repr(u8)]
+#[derive(Clone, Debug, PartialEq, Eq, MlsSize, MlsEncode, MlsDecode)]
+#[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
+pub enum TreeKemSecretKey {
+    Hpke(HpkeSecretKey) = 0,
+    Upke(UpkeSecretKey) = 1,
+}
+
+impl TreeKemSecretKey {
+    pub fn as_hpke(&self) -> Option<&HpkeSecretKey> {
+        if let TreeKemSecretKey::Hpke(pk) = self { Some(pk) } else { None }
+    }
+
+    pub fn as_upke(&self) -> Option<&UpkeSecretKey> {
+        if let TreeKemSecretKey::Upke(pk) = self { Some(pk) } else { None }
+    }
+}

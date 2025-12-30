@@ -12,11 +12,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 use itertools::Itertools;
 use mls_rs_codec::MlsEncode;
+use mls_rs_core::crypto::upke::{self, upke_upd_pk};
+use mls_rs_core::error::{AnyError, IntoAnyError};
 use tree_math::{CopathNode, TreeIndex};
-
+use mls_rs_core::crypto::{EncryptedPathSecretWithUpke, TreeKemPublicKey, TreeKemSecretKey, UpkePublicKey};
 #[cfg(all(not(mls_build_async), feature = "rayon"))]
 use {crate::iter::ParallelIteratorExt, rayon::prelude::*};
-
+use rand_chacha::{ChaCha20Rng, rand_core};
+use rand_core::{SeedableRng, RngCore};
 #[cfg(mls_build_async)]
 use futures::{StreamExt, TryStreamExt};
 
@@ -88,8 +91,8 @@ impl<'a> TreeKem<'a> {
                 let (secret_key, public_key) =
                     secret.to_hpke_key_pair(cipher_suite_provider).await?;
 
-                self.private_key.secret_keys[i + 1] = Some(secret_key);
-                self.tree_kem_public.update_node(public_key, node.path)?;
+                self.private_key.secret_keys[i + 1] = Some(TreeKemSecretKey::Hpke(secret_key));
+                self.tree_kem_public.update_node(TreeKemPublicKey::Hpke(public_key), node.path)?;
                 path_secrets.push(Some(secret));
             } else {
                 self.private_key.secret_keys[i + 1] = None;
@@ -108,16 +111,18 @@ impl<'a> TreeKem<'a> {
             let own_leaf = self.tree_kem_public.nodes.borrow_as_leaf_mut(self_index)?;
 
             self.private_key.secret_keys[0] = Some(
-                own_leaf
-                    .commit(
-                        cipher_suite_provider,
-                        &context.group_id,
-                        *self_index,
-                        update_leaf_properties,
-                        signing_identity,
-                        signer,
-                    )
-                    .await?,
+                TreeKemSecretKey::Upke(
+                    own_leaf
+                        .commit(
+                            cipher_suite_provider,
+                            &context.group_id,
+                            *self_index,
+                            update_leaf_properties,
+                            signing_identity,
+                            signer,
+                        )
+                        .await?,
+                )
             );
 
             #[cfg(test)]
@@ -269,14 +274,16 @@ impl<'a> TreeKem<'a> {
             .as_ref()
             .ok_or(MlsError::LcaNotFoundInDirectPath)?;
 
-        let ct = lca_node
+        let ct = &lca_node
             .encrypted_path_secret
             .get(ct_pos)
-            .ok_or(MlsError::LcaNotFoundInDirectPath)?;
+            .ok_or(MlsError::LcaNotFoundInDirectPath)?
+            .ciphertext;
 
         let secret = self.private_key.secret_keys[resolved_pos]
             .as_ref()
-            .ok_or(MlsError::UpdateErrorNoSecretKey)?;
+            .ok_or(MlsError::UpdateErrorNoSecretKey)?
+            .as_hpke().unwrap();
 
         let public = self
             .tree_kem_public
@@ -284,7 +291,9 @@ impl<'a> TreeKem<'a> {
             .borrow_node(path[resolved_pos].path)?
             .as_ref()
             .ok_or(MlsError::UpdateErrorNoSecretKey)?
-            .public_key();
+            .public_key()
+            .as_hpke()
+            .ok_or(MlsError::UpdateErrorNoSecretKey)?;
 
         let lca_path_secret =
             PathSecret::decrypt(cipher_suite_provider, secret, public, context_bytes, ct).await?;
@@ -305,11 +314,11 @@ impl<'a> TreeKem<'a> {
                 let (hpke_private, hpke_public) =
                     secret.to_hpke_key_pair(cipher_suite_provider).await?;
 
-                if hpke_public != update.public_key {
+                if hpke_public != update.public_key.as_hpke().unwrap().clone() {
                     return Err(MlsError::PubKeyMismatch);
                 }
 
-                self.private_key.secret_keys[i + 1] = Some(hpke_private);
+                self.private_key.secret_keys[i + 1] = Some(TreeKemSecretKey::Hpke((hpke_private)));
             } else {
                 self.private_key.secret_keys[i + 1] = None;
             }
@@ -340,11 +349,35 @@ impl<'a> TreeKem<'a> {
                 .borrow_node(idx)?
                 .as_non_empty()?;
 
-            path_secret
-                .encrypt(cipher_suite_provider, node.public_key(), context)
-                .await
-        };
+            let ct = path_secret
+                .encrypt(cipher_suite_provider, node.public_key().as_hpke().unwrap(), context)
+                .await?;
+            let pk_r: &UpkePublicKey = node
+                .public_key()
+                .as_upke()
+                .unwrap();
 
+            let seed = cipher_suite_provider
+                .random_bytes_vec(32)
+                .map_err(|e| MlsError::CryptoError(e.into_any_error()))?;
+
+            let seed_arr: [u8; 32] = seed
+                .as_slice()
+                .try_into()
+                .unwrap();
+
+            let mut rng = ChaCha20Rng::from_seed(seed_arr);
+
+
+            let (update_token, new_public_key) = upke_upd_pk(&mut rng, pk_r, 32 /* ell */).unwrap();
+            Ok::<EncryptedPathSecretWithUpke, MlsError>(EncryptedPathSecretWithUpke {
+                ciphertext: ct,
+                new_public_key,
+                update_token,
+            })
+
+        };
+        
         let ctxts = wrap_iter(reso).filter(|&idx| async move { !excluding.contains(&idx) });
 
         #[cfg(not(mls_build_async))]

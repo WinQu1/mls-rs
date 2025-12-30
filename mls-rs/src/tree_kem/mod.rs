@@ -21,7 +21,7 @@ use node::{LeafIndex, NodeIndex, NodeVec};
 use self::leaf_node::LeafNode;
 
 use crate::client::MlsError;
-use crate::crypto::{self, CipherSuiteProvider, HpkeSecretKey};
+use crate::crypto::{CipherSuiteProvider, UpkeSecretKey, TreeKemPublicKey};
 
 #[cfg(feature = "by_ref_proposal")]
 use crate::group::proposal::{AddProposal, UpdateProposal};
@@ -170,7 +170,7 @@ impl TreeKemPublic {
     #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
     pub async fn derive<I: IdentityProvider>(
         leaf_node: LeafNode,
-        secret_key: HpkeSecretKey,
+        secret_key: UpkeSecretKey,
         identity_provider: &I,
         extensions: &ExtensionList,
     ) -> Result<(TreeKemPublic, TreeKemPrivate), MlsError> {
@@ -255,7 +255,7 @@ impl TreeKemPublic {
 
     pub(crate) fn update_node(
         &mut self,
-        pub_key: crypto::HpkePublicKey,
+        pub_key: TreeKemPublicKey,
         index: NodeIndex,
     ) -> Result<(), MlsError> {
         self.nodes
@@ -1055,7 +1055,7 @@ mod tests {
             assert_eq!(test_tree.private.self_index, LeafIndex::unchecked(0));
 
             assert_eq!(
-                test_tree.private.secret_keys[0],
+                test_tree.private.node_hpke(0),
                 Some(test_tree.creator_hpke_secret)
             );
         }

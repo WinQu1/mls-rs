@@ -4,7 +4,7 @@
 
 use super::leaf_node::LeafNode;
 use crate::client::MlsError;
-use crate::crypto::HpkePublicKey;
+use crate::crypto::TreeKemPublicKey;
 use crate::tree_kem::math as tree_math;
 use crate::tree_kem::parent_hash::ParentHash;
 use alloc::vec;
@@ -23,7 +23,7 @@ pub(crate) const MAX_LEAF_INDEX: u32 = (1 << 24) - 1;
 #[derive(Clone, Debug, PartialEq, MlsSize, MlsEncode, MlsDecode)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct Parent {
-    pub public_key: HpkePublicKey,
+    pub public_key: TreeKemPublicKey,
     pub parent_hash: ParentHash,
     pub unmerged_leaves: Vec<LeafIndex>,
 }
@@ -118,7 +118,7 @@ pub(crate) enum Node {
 }
 
 impl Node {
-    pub fn public_key(&self) -> &HpkePublicKey {
+    pub fn public_key(&self) -> &TreeKemPublicKey {
         match self {
             Node::Parent(p) => &p.public_key,
             Node::Leaf(l) => &l.public_key,
@@ -356,7 +356,7 @@ impl NodeVec {
     pub fn borrow_or_fill_node_as_parent(
         &mut self,
         node_index: NodeIndex,
-        public_key: &HpkePublicKey,
+        public_key: &TreeKemPublicKey,
     ) -> Result<&mut Parent, MlsError> {
         let index = self.validate_index(node_index)?;
 

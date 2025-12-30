@@ -21,8 +21,8 @@ use mls_rs_codec::{MlsDecode, MlsEncode, MlsSize};
 use mls_rs_core::error::IntoAnyError;
 use zeroize::Zeroizing;
 
-use crate::crypto::{HpkeContextR, HpkeContextS, HpkePublicKey, HpkeSecretKey};
-
+use crate::crypto::{HpkeContextR, HpkeContextS, HpkeSecretKey};
+use mls_rs_core::crypto::HpkePublicKey;
 use super::epoch::{EpochSecrets, SenderDataSecret};
 use super::message_signature::AuthenticatedContent;
 

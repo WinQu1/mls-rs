@@ -3,7 +3,8 @@
 // SPDX-License-Identifier: (Apache-2.0 OR MIT)
 
 use crate::client::MlsError;
-use crate::crypto::{CipherSuiteProvider, HpkePublicKey, HpkeSecretKey};
+use crate::crypto::{CipherSuiteProvider, HpkeSecretKey};
+use mls_rs_core::crypto::{HpkePublicKey, UpkePublicKey, UpkeSecretKey};
 use crate::group::key_schedule::kdf_derive_secret;
 use alloc::vec;
 use alloc::vec::Vec;

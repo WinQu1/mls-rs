@@ -5,6 +5,7 @@
 use alloc::vec;
 use alloc::vec::Vec;
 use mls_rs_codec::{MlsDecode, MlsEncode};
+use mls_rs_core::crypto::UpkeSecretKey;
 use mls_rs_core::{error::IntoAnyError, key_package::KeyPackageData};
 
 use crate::client::MlsError;
@@ -39,7 +40,7 @@ pub struct KeyPackageGeneration {
     pub(crate) reference: KeyPackageRef,
     pub(crate) key_package: KeyPackage,
     pub(crate) init_secret_key: HpkeSecretKey,
-    pub(crate) leaf_node_secret_key: HpkeSecretKey,
+    pub(crate) leaf_node_secret_key: UpkeSecretKey,
 }
 
 impl KeyPackageGeneration {
@@ -94,7 +95,7 @@ where
     ) -> Result<KeyPackageGeneration, MlsError> {
         let (init_secret_key, public_init) = self
             .cipher_suite_provider
-            .ukem_generate()
+            .kem_generate()
             .await
             .map_err(|e| MlsError::CryptoProviderError(e.into_any_error()))?;
 
@@ -130,7 +131,7 @@ where
         Ok(KeyPackageGeneration {
             key_package: package,
             init_secret_key,
-            leaf_node_secret_key: leaf_node_secret,
+            leaf_node_secret_key: leaf_node_secret.as_upke().unwrap().clone(),
             reference,
         })
     }

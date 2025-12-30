@@ -25,9 +25,6 @@ use itertools::Itertools;
 use alloc::collections::BTreeSet;
 
 #[cfg(feature = "tree_index")]
-use mls_rs_core::crypto::HpkePublicKey;
-
-#[cfg(feature = "tree_index")]
 #[derive(Clone, Default, PartialEq, Eq, MlsSize, MlsEncode, MlsDecode, Hash, PartialOrd, Ord)]
 pub struct Identifier(#[mls_codec(with = "mls_rs_codec::byte_vec")] Vec<u8>);
 
@@ -44,7 +41,7 @@ impl Debug for Identifier {
 #[derive(Clone, Debug, Default, PartialEq, MlsSize, MlsEncode, MlsDecode)]
 pub struct TreeIndex {
     credential_signature_key: LargeMap<SignaturePublicKey, LeafIndex>,
-    hpke_key: LargeMap<HpkePublicKey, LeafIndex>,
+    hpke_key: LargeMap<TreeKemPublicKey, LeafIndex>,
     identities: LargeMap<Identifier, LeafIndex>,
     credential_type_counters: LargeMap<CredentialType, TypeCounter>,
     #[cfg(feature = "custom_proposal")]

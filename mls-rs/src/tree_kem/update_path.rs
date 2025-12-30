@@ -5,9 +5,7 @@
 use alloc::{vec, vec::Vec};
 use mls_rs_codec::{MlsDecode, MlsEncode, MlsSize};
 use mls_rs_core::{
-    error::IntoAnyError,
-    group::GroupContext,
-    identity::{IdentityProvider, MemberValidationContext},
+    crypto::EncryptedPathSecretWithUpke, error::IntoAnyError, group::GroupContext, identity::{IdentityProvider, MemberValidationContext}
 };
 
 use super::{
@@ -17,7 +15,7 @@ use super::{
 };
 use crate::{
     client::MlsError,
-    crypto::{CipherSuiteProvider, HpkeCiphertext, HpkePublicKey},
+    crypto::{CipherSuiteProvider, HpkeCiphertext, TreeKemPublicKey},
 };
 use crate::{group::message_processor::ProvisionalState, time::MlsTime};
 
@@ -25,8 +23,8 @@ use crate::{group::message_processor::ProvisionalState, time::MlsTime};
 #[cfg_attr(feature = "arbitrary", derive(arbitrary::Arbitrary))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub struct UpdatePathNode {
-    pub public_key: HpkePublicKey,
-    pub encrypted_path_secret: Vec<HpkeCiphertext>,
+    pub public_key: TreeKemPublicKey,
+    pub encrypted_path_secret: Vec<EncryptedPathSecretWithUpke>,
 }
 
 #[derive(Clone, Debug, PartialEq, MlsSize, MlsEncode, MlsDecode)]
@@ -132,6 +130,7 @@ mod tests {
     use crate::tree_kem::parent_hash::ParentHash;
     use crate::tree_kem::test_utils::{get_test_leaf_nodes, get_test_tree};
     use crate::tree_kem::validate_update_path;
+    use mls_rs_core::crypto::{EncryptedPathSecretWithUpke, UpkeUpdateToken};
 
     use super::{UpdatePath, UpdatePathNode};
     use crate::{cipher_suite::CipherSuite, tree_kem::MlsError};
@@ -158,9 +157,10 @@ mod tests {
 
         let node = UpdatePathNode {
             public_key: random_bytes(32).into(),
-            encrypted_path_secret: vec![HpkeCiphertext {
-                kem_output: random_bytes(32),
-                ciphertext: random_bytes(32),
+            encrypted_path_secret: vec![EncryptedPathSecretWithUpke {
+                ciphertext: HpkeCiphertext { kem_output: random_bytes(32), ciphertext: random_bytes(32) },
+                new_public_key: random_bytes( (32 + 1) * 32 ).into(), // must match UPKE pk length if you validate lengths
+                update_token: UpkeUpdateToken(vec![]),
             }],
         };
 

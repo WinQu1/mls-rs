@@ -116,7 +116,7 @@ async fn tree_kem() {
 
                 let private_key = if let Some(secret) = secret {
                     let (secret_key, public_key) = PathSecret::from(secret)
-                        .to_hpke_key_pair(&cs)
+                        .to_upke_key_pair(&cs)
                         .await
                         .unwrap();
 

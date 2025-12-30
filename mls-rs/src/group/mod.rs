@@ -4,6 +4,8 @@
 
 use alloc::vec;
 use alloc::vec::Vec;
+#[cfg(feature = "by_ref_proposal")]
+use mls_rs_core::crypto::TreeKemPublicKey;
 use core::fmt::{self, Debug};
 use mls_rs_codec::{MlsDecode, MlsEncode, MlsSize};
 use mls_rs_core::error::IntoAnyError;
@@ -40,8 +42,8 @@ use crate::{CipherSuiteProvider, CryptoProvider};
 pub use state::GroupState;
 
 #[cfg(feature = "by_ref_proposal")]
-use crate::crypto::{HpkePublicKey, HpkeSecretKey};
-
+use crate::crypto::{UpkeSecretKey};
+use mls_rs_core::crypto::TreeKemSecretKey;
 use crate::extension::ExternalPubExt;
 
 use self::message_hash::MessageHash;
@@ -275,7 +277,7 @@ where
     key_schedule: KeySchedule,
     #[cfg(feature = "by_ref_proposal")]
     pending_updates:
-        crate::map::SmallMap<HpkePublicKey, (HpkeSecretKey, Option<SignatureSecretKey>)>,
+        crate::map::SmallMap<TreeKemPublicKey, (TreeKemSecretKey, Option<SignatureSecretKey>)>,
     pending_commit: PendingCommitSnapshot,
     #[cfg(feature = "psk")]
     previous_psk: Option<PskSecretInput>,
@@ -315,7 +317,7 @@ where
 
         let (mut public_tree, private_tree) = TreeKemPublic::derive(
             leaf_node,
-            leaf_node_secret,
+            leaf_node_secret.as_upke().unwrap().clone(),
             &config.identity_provider(),
             &group_context_extensions,
         )
@@ -624,7 +626,7 @@ where
         let member_public_key = &member_leaf_node.public_key;
         let hpke_ciphertext = self
             .cipher_suite_provider
-            .hpke_seal(member_public_key, context_info, associated_data, plaintext)
+            .hpke_seal(member_public_key.as_hpke().unwrap(), context_info, associated_data, plaintext)
             .await
             .map_err(|e| MlsError::CryptoProviderError(e.into_any_error()))?;
         Ok(hpke_ciphertext)
@@ -687,7 +689,7 @@ where
         associated_data: Option<&[u8]>,
         hpke_ciphertext: HpkeCiphertext,
     ) -> Result<Vec<u8>, MlsError> {
-        let self_private_key = &self.private_tree.secret_keys[0]
+        let self_private_key = self.private_tree.secret_keys[0]
             .as_ref()
             .ok_or(MlsError::InvalidTreeKemPrivateKey)?;
         let self_public_key = &self.current_user_leaf_node()?.public_key;
@@ -695,8 +697,8 @@ where
             .cipher_suite_provider
             .hpke_open(
                 &hpke_ciphertext,
-                self_private_key,
-                self_public_key,
+                self_private_key.as_hpke().unwrap(),
+                self_public_key.as_hpke().unwrap(),
                 context_info,
                 associated_data,
             )
@@ -1032,7 +1034,7 @@ where
         // Store the secret key in the pending updates storage for later
         #[cfg(feature = "std")]
         self.pending_updates
-            .insert(new_leaf_node.public_key.clone(), (secret_key, signer));
+            .insert(new_leaf_node.public_key.clone(), (TreeKemSecretKey::Upke((secret_key)), signer));
 
         #[cfg(not(feature = "std"))]
         self.pending_updates

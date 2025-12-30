@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: (Apache-2.0 OR MIT)
 
 use crate::client::MlsError;
-use crate::crypto::{CipherSuiteProvider, HpkePublicKey};
+use crate::crypto::{CipherSuiteProvider};
 use crate::tree_kem::math as tree_math;
 use crate::tree_kem::node::{LeafIndex, Node, NodeIndex};
 use crate::tree_kem::tree_hash::TreeHash;
@@ -16,6 +16,7 @@ use core::{
 use mls_rs_codec::{MlsDecode, MlsEncode, MlsSize};
 use mls_rs_core::error::IntoAnyError;
 use tree_math::TreeIndex;
+use crate::crypto::TreeKemPublicKey;
 
 use super::leaf_node::LeafNodeSource;
 
@@ -27,8 +28,7 @@ use alloc::collections::BTreeSet;
 
 #[derive(Clone, Debug, MlsSize, MlsEncode)]
 struct ParentHashInput<'a> {
-    #[mls_codec(with = "mls_rs_codec::byte_vec")]
-    public_key: &'a HpkePublicKey,
+    public_key: &'a TreeKemPublicKey,
     #[mls_codec(with = "mls_rs_codec::byte_vec")]
     parent_hash: &'a [u8],
     #[mls_codec(with = "mls_rs_codec::byte_vec")]
@@ -70,7 +70,7 @@ impl ParentHash {
     #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
     pub async fn new<P: CipherSuiteProvider>(
         cipher_suite_provider: &P,
-        public_key: &HpkePublicKey,
+        public_key: &TreeKemPublicKey,
         parent_hash: &ParentHash,
         original_sibling_tree_hash: &[u8],
     ) -> Result<Self, MlsError> {

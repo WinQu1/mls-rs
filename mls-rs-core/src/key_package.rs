@@ -8,7 +8,7 @@ use alloc::vec::Vec;
 use core::fmt::{self, Debug};
 use mls_rs_codec::{MlsDecode, MlsEncode, MlsSize};
 
-use crate::{crypto::HpkeSecretKey, error::IntoAnyError};
+use crate::{crypto::{HpkeSecretKey, UpkeSecretKey}, error::IntoAnyError};
 
 #[derive(Clone, PartialEq, Eq, MlsEncode, MlsDecode, MlsSize)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
@@ -18,7 +18,7 @@ pub struct KeyPackageData {
     #[cfg_attr(feature = "serde", serde(with = "crate::vec_serde"))]
     pub key_package_bytes: Vec<u8>,
     pub init_key: HpkeSecretKey,
-    pub leaf_node_key: HpkeSecretKey,
+    pub leaf_node_key: UpkeSecretKey,
     /// Seconds since the Unix epoch starting Jan 1st 1970.
     pub expiration: u64,
 }
@@ -41,7 +41,7 @@ impl KeyPackageData {
     pub fn new(
         key_package_bytes: Vec<u8>,
         init_key: HpkeSecretKey,
-        leaf_node_key: HpkeSecretKey,
+        leaf_node_key: UpkeSecretKey,
         expiration: u64,
     ) -> KeyPackageData {
         Self {
