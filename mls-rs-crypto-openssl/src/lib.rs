@@ -153,10 +153,6 @@ where
         })
     }
 
-    async fn upke_generate_impl(&self) -> Result<(UpkeSecretKey, UpkePublicKey), OpensslCryptoError> {
-        crate::upke::generate_keypair_from_provider_random(|out| self.random_bytes(out))
-    }
-
     pub fn random_bytes(&self, out: &mut [u8]) -> Result<(), OpensslCryptoError> {
         Ok(openssl::rand::rand_bytes(out)?)
     }
@@ -321,10 +317,6 @@ where
     async fn kem_generate(&self) -> Result<(HpkeSecretKey, HpkePublicKey), Self::Error> {
         Ok(self.hpke.generate().await?)
     }
-    async fn ukem_generate(&self) -> Result<(UpkeSecretKey, UpkePublicKey), Self::Error> {
-        self.upke_generate_impl().await
-   }
-
 
     fn kem_public_key_validate(&self, key: &HpkePublicKey) -> Result<(), Self::Error> {
         Ok(self.hpke.public_key_validate(key)?)

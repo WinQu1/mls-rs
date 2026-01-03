@@ -33,3 +33,5 @@ where
     let rng = ChaCha20Rng::from_seed(seed);
     generate_keypair(rng)
 }
+#[cfg(test)]
+mod upke_tests;
