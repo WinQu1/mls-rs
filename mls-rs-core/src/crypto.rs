@@ -490,9 +490,6 @@ pub trait CipherSuiteProvider: Send + Sync {
     /// and [hpke_open](CipherSuiteProvider::hpke_open).
     async fn kem_generate(&self) -> Result<(HpkeSecretKey, HpkePublicKey), Self::Error>;
 
-    async fn ukem_generate(&self) -> Result<(UpkeSecretKey, UpkePublicKey), Self::Error>;
-
-
     /// Verify that the given byte vector `key` can be decoded as an HPKE public key.
     fn kem_public_key_validate(&self, key: &HpkePublicKey) -> Result<(), Self::Error>;
 

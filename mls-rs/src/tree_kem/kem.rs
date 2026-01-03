@@ -12,14 +12,14 @@ use alloc::vec;
 use alloc::vec::Vec;
 use itertools::Itertools;
 use mls_rs_codec::MlsEncode;
-use mls_rs_core::crypto::upke::{self, upke_upd_pk};
-use mls_rs_core::error::{AnyError, IntoAnyError};
+use mls_rs_core::crypto::upke::{UpkeError, upke_upd_pk, upke_upd_sk};
+use mls_rs_core::error::{IntoAnyError};
 use tree_math::{CopathNode, TreeIndex};
 use mls_rs_core::crypto::{EncryptedPathSecretWithUpke, TreeKemPublicKey, TreeKemSecretKey, UpkePublicKey};
 #[cfg(all(not(mls_build_async), feature = "rayon"))]
 use {crate::iter::ParallelIteratorExt, rayon::prelude::*};
 use rand_chacha::{ChaCha20Rng, rand_core};
-use rand_core::{SeedableRng, RngCore};
+use rand_core::{SeedableRng};
 #[cfg(mls_build_async)]
 use futures::{StreamExt, TryStreamExt};
 
@@ -274,11 +274,20 @@ impl<'a> TreeKem<'a> {
             .as_ref()
             .ok_or(MlsError::LcaNotFoundInDirectPath)?;
 
-        let ct = &lca_node
+        let eps = lca_node
             .encrypted_path_secret
             .get(ct_pos)
-            .ok_or(MlsError::LcaNotFoundInDirectPath)?
-            .ciphertext;
+            .ok_or(MlsError::LcaNotFoundInDirectPath)?;
+
+        let token = &eps.update_token;
+
+        let old_sk = self.private_key.leaf_upke()
+            .as_ref()
+            .ok_or(MlsError::UpdateErrorNoSecretKey)?;
+
+        let new_sk = upke_upd_sk(old_sk, token, 32 /* ell */).ok().unwrap();
+
+        self.private_key.leaf_upke() = Some(&new_sk);
 
         let secret = self.private_key.secret_keys[resolved_pos]
             .as_ref()
@@ -296,7 +305,7 @@ impl<'a> TreeKem<'a> {
             .ok_or(MlsError::UpdateErrorNoSecretKey)?;
 
         let lca_path_secret =
-            PathSecret::decrypt(cipher_suite_provider, secret, public, context_bytes, ct).await?;
+            PathSecret::decrypt(cipher_suite_provider, secret, public, context_bytes, &eps.ciphertext).await?;
 
         // Derive the rest of the secrets for the tree and assign to the proper nodes
         let mut node_secret_gen =
@@ -318,7 +327,7 @@ impl<'a> TreeKem<'a> {
                     return Err(MlsError::PubKeyMismatch);
                 }
 
-                self.private_key.secret_keys[i + 1] = Some(TreeKemSecretKey::Hpke((hpke_private)));
+                self.private_key.secret_keys[i + 1] = Some(TreeKemSecretKey::Hpke(hpke_private));
             } else {
                 self.private_key.secret_keys[i + 1] = None;
             }
@@ -352,7 +361,7 @@ impl<'a> TreeKem<'a> {
             let ct = path_secret
                 .encrypt(cipher_suite_provider, node.public_key().as_hpke().unwrap(), context)
                 .await?;
-            let pk_r: &UpkePublicKey = node
+            let pk_r = node
                 .public_key()
                 .as_upke()
                 .unwrap();
@@ -533,7 +542,7 @@ mod tests {
             .enumerate();
 
         for (i, n) in path_iter {
-            let secret_key = private_tree.secret_keys[i + 1].as_ref().unwrap();
+            let secret_key = private_tree.secret_keys[i + 1].as_ref().unwrap().as_hpke().unwrap();
 
             let public_key = public_tree
                 .nodes
@@ -541,7 +550,7 @@ mod tests {
                 .unwrap()
                 .as_ref()
                 .unwrap()
-                .public_key();
+                .public_key().as_hpke().unwrap();
 
             let test_data = random_bytes(32);
 

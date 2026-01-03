@@ -204,7 +204,7 @@ pub const UPKE_L: usize = 32;
 
 /// Build one token ciphertext of the form:
 /// (g_1^{r}, ..., g_ell^{r}, h^{r} * g^{delta})
-fn u_enc_delta(
+pub fn u_enc_delta(
     g: &[RistrettoPoint],
     h: &RistrettoPoint,
     r: &Scalar,
@@ -338,12 +338,5 @@ pub fn upke_upd_sk(sk: &UpkeSecretKey, token: &UpkeUpdateToken, ell: usize) -> R
 }
 
 
-pub fn validate_update_token(tok: &UpkeUpdateToken, ell: usize) -> Result<(), UpkeError> {
-    if tok.0.len() != ell {
-        return Err(UpkeError::InvalidLength);
-    }
-    for ct in &tok.0 {
-        let _ = parse_ciphertext(ct, ell)?;
-    }
-    Ok(())
-}
+#[cfg(test)]
+mod upke_tests;
