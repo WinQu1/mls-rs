@@ -403,8 +403,9 @@ async fn make_group<P: CipherSuiteProvider>(
 
     // Add a leaf for the sender. It will get index 1.
     let mut leaf = get_basic_test_node(cs.cipher_suite(), "leaf").await;
+    let si = leaf.signing_identity.as_mut().expect("leaf must have identity in test vectors");
 
-    leaf.signing_identity.signature_key = SignaturePublicKey::from(test_case.signature_pub.clone());
+    si.signature_key = SignaturePublicKey::from(test_case.signature_pub.clone());
 
     group
         .state

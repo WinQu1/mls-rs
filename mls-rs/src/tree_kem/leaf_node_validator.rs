@@ -94,7 +94,7 @@ impl<'a, C: IdentityProvider, CP: CipherSuiteProvider> LeafNodeValidator<'a, C, 
             }
             ValidationContext::Commit(_) => {
                 // If the leaf_node_source is anything other than Commit it is invalid
-                if !matches!(leaf_node.leaf_node_source, LeafNodeSource::Commit(_)) {
+                if !matches!(leaf_node.leaf_node_source, LeafNodeSource::Commit(_)  | LeafNodeSource::Ghost) {
                     return Err(MlsError::InvalidLeafNodeSource);
                 }
             }
@@ -116,7 +116,9 @@ impl<'a, C: IdentityProvider, CP: CipherSuiteProvider> LeafNodeValidator<'a, C, 
             LeafNodeSource::Update => ValidationContext::Update((group_id, leaf_index, maybe_time)),
             LeafNodeSource::Commit(_) => {
                 ValidationContext::Commit((group_id, leaf_index, maybe_time))
-            }
+            },
+            LeafNodeSource::Ghost => ValidationContext::Commit((group_id, leaf_index, maybe_time)),
+
         };
 
         self.check_if_valid(leaf_node, context).await
@@ -188,23 +190,37 @@ impl<'a, C: IdentityProvider, CP: CipherSuiteProvider> LeafNodeValidator<'a, C, 
         self.check_context(leaf_node, &context)?;
 
         // Verify the credential
-        self.identity_provider
-            .validate_member(
-                &leaf_node.signing_identity,
-                context.generation_time(),
-                self.context,
-            )
-            .await
-            .map_err(|e| MlsError::IdentityProviderError(e.into_any_error()))?;
+        if matches!(leaf_node.leaf_node_source, LeafNodeSource::Ghost) {
+        // Ghost: must have no identity and signature must be exactly [0]
+        if leaf_node.signing_identity.is_some() {
+            return Err(MlsError::InvalidLeafNodeSource);
+        }
 
-        // Verify that the credential signed the leaf node
-        leaf_node
-            .verify(
-                self.cipher_suite_provider,
-                &leaf_node.signing_identity.signature_key,
-                &context.signing_context(),
-            )
-            .await?;
+        if leaf_node.signature.as_slice() != [0u8] {
+            return Err(MlsError::InvalidSignature);
+        }
+        } else {
+            // Non-ghost: must have identity
+            let signing_identity = leaf_node
+                .signing_identity
+                .as_ref()
+                .ok_or(MlsError::InvalidLeafNodeSource)?;
+
+            // Verify the credential
+            self.identity_provider
+                .validate_member(signing_identity, context.generation_time(), self.context)
+                .await
+                .map_err(|e| MlsError::IdentityProviderError(e.into_any_error()))?;
+
+            // Verify that the credential signed the leaf node
+            leaf_node
+                .verify(
+                    self.cipher_suite_provider,
+                    &signing_identity.signature_key,
+                    &context.signing_context(),
+                )
+                .await?;
+        }
 
         // If required capabilities are specified, verify the leaf node meets the requirements
         self.validate_required_capabilities(leaf_node)?;
@@ -307,7 +323,7 @@ mod tests {
         let (signing_identity, secret) = get_test_signing_identity(TEST_CIPHER_SUITE, b"foo").await;
 
         let (leaf_node, _) =
-            get_test_node(TEST_CIPHER_SUITE, signing_identity, &secret, None, None).await;
+            get_test_node(TEST_CIPHER_SUITE, Some(signing_identity), &secret, None, None).await;
 
         (leaf_node, secret)
     }
@@ -484,7 +500,7 @@ mod tests {
             let (signing_identity, secret) = get_test_signing_identity(cipher_suite, b"foo").await;
 
             let (mut leaf_node, _) =
-                get_test_node(cipher_suite, signing_identity, &secret, None, None).await;
+                get_test_node(cipher_suite, Some(signing_identity), &secret, None, None).await;
 
             leaf_node.signature = random_bytes(leaf_node.signature.len());
 
@@ -514,7 +530,7 @@ mod tests {
 
         let (leaf_node, _) = get_test_node(
             TEST_CIPHER_SUITE,
-            signing_identity,
+            Some(signing_identity),
             &secret,
             Some(capabilities),
             Some(extensions),

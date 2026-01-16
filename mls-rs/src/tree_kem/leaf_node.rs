@@ -19,6 +19,7 @@ pub enum LeafNodeSource {
     KeyPackage(Lifetime) = 1u8,
     Update = 2u8,
     Commit(ParentHash) = 3u8,
+    Ghost = 4u8,
 }
 
 #[derive(Clone, MlsSize, MlsEncode, MlsDecode, PartialEq)]
@@ -27,10 +28,12 @@ pub enum LeafNodeSource {
 #[non_exhaustive]
 pub struct LeafNode {
     pub public_key: HpkePublicKey,
-    pub signing_identity: SigningIdentity,
+    pub signing_identity: Option<SigningIdentity>,
     pub capabilities: Capabilities,
     pub leaf_node_source: LeafNodeSource,
     pub extensions: ExtensionList,
+    pub epk: u64,
+    pub equar: Option<u64>,
     #[mls_codec(with = "mls_rs_codec::byte_vec")]
     #[cfg_attr(feature = "serde", serde(with = "mls_rs_core::vec_serde"))]
     pub signature: Vec<u8>,
@@ -63,7 +66,7 @@ impl LeafNode {
     pub async fn generate<CSP>(
         cipher_suite_provider: &CSP,
         properties: ConfigProperties,
-        signing_identity: SigningIdentity,
+        signing_identity: Option<SigningIdentity>,
         signer: &SignatureSecretKey,
         lifetime: Lifetime,
     ) -> Result<(Self, HpkeSecretKey), MlsError>
@@ -80,6 +83,8 @@ impl LeafNode {
             signing_identity,
             capabilities: properties.capabilities,
             leaf_node_source: LeafNodeSource::KeyPackage(lifetime),
+            epk: 0,
+            equar: None,
             extensions: properties.extensions,
             signature: Default::default(),
         };
@@ -124,7 +129,7 @@ impl LeafNode {
         self.grease(cipher_suite_provider)?;
 
         if let Some(signing_identity) = signing_identity {
-            self.signing_identity = signing_identity;
+            self.signing_identity = Some(signing_identity);
         }
 
         self.sign(
@@ -161,7 +166,7 @@ impl LeafNode {
         }
 
         if let Some(new_signing_identity) = new_signing_identity {
-            self.signing_identity = new_signing_identity;
+            self.signing_identity = Some(new_signing_identity);
         }
 
         self.sign(
@@ -173,17 +178,39 @@ impl LeafNode {
 
         Ok(secret)
     }
+
+    pub fn mark_as_ghost(&mut self) {
+        self.leaf_node_source = LeafNodeSource::Ghost;
+        self.signing_identity = None;
+        self.signature = alloc::vec![0u8]; 
+    }
+
+    pub fn signing_identity_ref(&self) -> Result<&SigningIdentity, MlsError> {
+        self.signing_identity
+            .as_ref()
+            .ok_or(MlsError::InvalidLeafNodeSource) // или новый error
+    }
+
+    pub fn signature_key_ref(&self) -> Result<&crate::crypto::SignaturePublicKey, MlsError> {
+        Ok(&self.signing_identity_ref()?.signature_key)
+    }
+
+    pub fn credential_ref(&self) -> Result<&crate::identity::Credential, MlsError> {
+        Ok(&self.signing_identity_ref()?.credential)
+    }
 }
 
 #[derive(Debug)]
 struct LeafNodeTBS<'a> {
     public_key: &'a HpkePublicKey,
-    signing_identity: &'a SigningIdentity,
+    signing_identity: &'a Option<SigningIdentity>,
     capabilities: &'a Capabilities,
     leaf_node_source: &'a LeafNodeSource,
     extensions: &'a ExtensionList,
     group_id: Option<&'a [u8]>,
     leaf_index: Option<u32>,
+    pub epk: u64,
+    pub equar: &'a Option<u64>,
 }
 
 impl MlsSize for LeafNodeTBS<'_> {
@@ -192,6 +219,8 @@ impl MlsSize for LeafNodeTBS<'_> {
             + self.signing_identity.mls_encoded_len()
             + self.capabilities.mls_encoded_len()
             + self.leaf_node_source.mls_encoded_len()
+            + self.epk.mls_encoded_len()
+            + self.equar.mls_encoded_len()
             + self.extensions.mls_encoded_len()
             + self
                 .group_id
@@ -207,6 +236,8 @@ impl MlsEncode for LeafNodeTBS<'_> {
         self.signing_identity.mls_encode(writer)?;
         self.capabilities.mls_encode(writer)?;
         self.leaf_node_source.mls_encode(writer)?;
+        self.epk.mls_encode(writer)?;
+        self.equar.mls_encode(writer)?;
         self.extensions.mls_encode(writer)?;
 
         if let Some(ref group_id) = self.group_id {
@@ -257,6 +288,8 @@ impl<'a> Signable<'a> for LeafNode {
             extensions: &self.extensions,
             group_id: context.group_id,
             leaf_index: context.leaf_index,
+            epk: self.epk,
+            equar: &self.equar,
         }
         .mls_encode_to_vec()
     }
@@ -285,7 +318,7 @@ pub(crate) mod test_utils {
     #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
     pub async fn get_test_node(
         cipher_suite: CipherSuite,
-        signing_identity: SigningIdentity,
+        signing_identity: Option<SigningIdentity>,
         secret: &SignatureSecretKey,
         capabilities: Option<Capabilities>,
         extensions: Option<ExtensionList>,
@@ -304,7 +337,7 @@ pub(crate) mod test_utils {
     #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
     pub async fn get_test_node_with_lifetime(
         cipher_suite: CipherSuite,
-        signing_identity: SigningIdentity,
+        signing_identity: Option<SigningIdentity>,
         secret: &SignatureSecretKey,
         capabilities: Capabilities,
         extensions: ExtensionList,
@@ -355,7 +388,7 @@ pub(crate) mod test_utils {
                 capabilities,
                 extensions: Default::default(),
             },
-            signing_identity,
+            Some(signing_identity),
             &signature_key,
             Lifetime::years(1, None).unwrap(),
         )
@@ -398,7 +431,8 @@ pub(crate) mod test_utils {
 
     #[allow(unused)]
     pub fn get_test_client_identity(leaf: &LeafNode) -> Vec<u8> {
-        leaf.signing_identity
+        leaf.signing_identity.as_ref()
+            .unwrap()
             .credential
             .mls_encode_to_vec()
             .unwrap()
@@ -428,7 +462,7 @@ mod tests {
 
             let (leaf_node, secret_key) = get_test_node_with_lifetime(
                 cipher_suite,
-                signing_identity.clone(),
+                Some(signing_identity.clone()),
                 &secret,
                 capabilities.clone(),
                 extensions.clone(),
@@ -438,7 +472,7 @@ mod tests {
 
             assert_eq!(leaf_node.ungreased_capabilities(), capabilities);
             assert_eq!(leaf_node.ungreased_extensions(), extensions);
-            assert_eq!(leaf_node.signing_identity, signing_identity);
+            assert_eq!(leaf_node.signing_identity.as_ref(), Some(&signing_identity));
 
             assert_matches!(
                 &leaf_node.leaf_node_source,
@@ -482,11 +516,11 @@ mod tests {
         let (signing_identity, secret) = get_test_signing_identity(cipher_suite, b"foo").await;
 
         let (first_leaf, first_secret) =
-            get_test_node(cipher_suite, signing_identity.clone(), &secret, None, None).await;
+            get_test_node(cipher_suite, Some(signing_identity.clone()), &secret, None, None).await;
 
         for _ in 0..100 {
             let (next_leaf, next_secret) =
-                get_test_node(cipher_suite, signing_identity.clone(), &secret, None, None).await;
+                get_test_node(cipher_suite, Some(signing_identity.clone()), &secret, None, None).await;
 
             assert_ne!(first_secret, next_secret);
             assert_ne!(first_leaf.public_key, next_leaf.public_key);
@@ -501,7 +535,7 @@ mod tests {
             let (signing_identity, secret) = get_test_signing_identity(cipher_suite, b"foo").await;
 
             let (mut leaf, leaf_secret) =
-                get_test_node(cipher_suite, signing_identity.clone(), &secret, None, None).await;
+                get_test_node(cipher_suite, Some(signing_identity.clone()), &secret, None, None).await;
 
             let original_leaf = leaf.clone();
 
@@ -555,7 +589,7 @@ mod tests {
         };
 
         let (mut leaf, _) =
-            get_test_node(cipher_suite, signing_identity, &secret, None, None).await;
+            get_test_node(cipher_suite, Some(signing_identity), &secret, None, None).await;
 
         leaf.update(
             &test_cipher_suite_provider(cipher_suite),
@@ -580,7 +614,7 @@ mod tests {
             let (signing_identity, secret) = get_test_signing_identity(cipher_suite, b"foo").await;
 
             let (mut leaf, leaf_secret) =
-                get_test_node(cipher_suite, signing_identity.clone(), &secret, None, None).await;
+                get_test_node(cipher_suite, Some(signing_identity.clone()), &secret, None, None).await;
 
             let original_leaf = leaf.clone();
 
@@ -627,7 +661,7 @@ mod tests {
 
         let (signing_identity, secret) = get_test_signing_identity(cipher_suite, b"foo").await;
         let (mut leaf, _) =
-            get_test_node(cipher_suite, signing_identity, &secret, None, None).await;
+            get_test_node(cipher_suite, Some(signing_identity), &secret, None, None).await;
 
         let new_properties = ConfigProperties {
             capabilities: get_test_capabilities(),
@@ -650,7 +684,7 @@ mod tests {
 
         assert_eq!(leaf.capabilities, new_properties.capabilities);
         assert_eq!(leaf.extensions, new_properties.extensions);
-        assert_eq!(leaf.signing_identity, new_signing_identity);
+        assert_eq!(leaf.signing_identity, Some(new_signing_identity));
     }
 
     #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
@@ -661,7 +695,7 @@ mod tests {
 
         let (mut leaf, _) = get_test_node(
             TEST_CIPHER_SUITE,
-            signing_identity.clone(),
+            Some(signing_identity.clone()),
             &secret,
             None,
             None,

@@ -150,8 +150,7 @@ fn signing_identity_for_member(
     match signature_keys_container {
         SignaturePublicKeysContainer::RatchetTree(tree) => Ok(tree
             .get_leaf_node(leaf_index)?
-            .signing_identity
-            .signature_key
+            .signature_key_ref()?
             .clone()), // TODO: We can probably get rid of this clone
         #[cfg(feature = "private_message")]
         SignaturePublicKeysContainer::List(list) => list
@@ -179,7 +178,7 @@ fn signing_identity_for_new_member_commit(
     match content {
         super::framing::Content::Commit(commit) => {
             if let Some(path) = &commit.path {
-                Ok(path.leaf_node.signing_identity.signature_key.clone())
+                Ok(path.leaf_node.signature_key_ref()?.clone())
             } else {
                 Err(MlsError::CommitMissingPath)
             }
@@ -198,8 +197,7 @@ fn signing_identity_for_new_member_proposal(
             if let Proposal::Add(p) = proposal.as_ref() {
                 Ok(p.key_package
                     .leaf_node
-                    .signing_identity
-                    .signature_key
+                    .signature_key_ref()?
                     .clone())
             } else {
                 Err(MlsError::ExpectedAddProposalForNewMemberProposal)

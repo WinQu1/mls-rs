@@ -3,6 +3,7 @@
 // SPDX-License-Identifier: (Apache-2.0 OR MIT)
 
 use super::*;
+use crate::tree_kem::leaf_node::LeafNodeSource;
 #[cfg(feature = "tree_index")]
 use core::fmt::{self, Debug};
 
@@ -60,8 +61,17 @@ pub(super) async fn index_insert<I: IdentityProvider>(
     id_provider: &I,
     extensions: &ExtensionList,
 ) -> Result<(), MlsError> {
+    if matches!(new_leaf.leaf_node_source, LeafNodeSource::Ghost) {
+        return Ok(());
+    }
+
+    let si = new_leaf
+        .signing_identity
+        .as_ref()
+        .ok_or(MlsError::InvalidLeafNodeSource)?;
+
     let new_id = id_provider
-        .identity(&new_leaf.signing_identity, extensions)
+        .identity(si, extensions)
         .await
         .map_err(|e| MlsError::IdentityProviderError(e.into_any_error()))?;
 
@@ -139,7 +149,7 @@ impl TreeIndex {
     ) -> Result<(), MlsError> {
         let old_leaf_count = self.credential_signature_key.len();
 
-        let pub_key = leaf_node.signing_identity.signature_key.clone();
+        let pub_key = leaf_node.signature_key_ref()?.clone();
         let credential_entry = self.credential_signature_key.entry(pub_key);
 
         if let LargeMapEntry::Occupied(entry) = credential_entry {
@@ -167,7 +177,7 @@ impl TreeIndex {
             return Err(MlsError::InUseCredentialTypeUnsupportedByNewLeaf);
         }
 
-        let new_leaf_cred_type = leaf_node.signing_identity.credential.credential_type();
+        let new_leaf_cred_type = leaf_node.credential_ref()?.credential_type();
 
         let cred_type_counters = self
             .credential_type_counters
@@ -229,8 +239,13 @@ impl TreeIndex {
             .remove(&Identifier(identity.to_vec()))
             .is_some();
 
+        let Some(si) = leaf_node.signing_identity.as_ref() else {
+            let _ = self.identities.remove(&Identifier(identity.to_vec()));
+            return;
+        };
+
         self.credential_signature_key
-            .remove(&leaf_node.signing_identity.signature_key);
+            .remove(&si.signature_key);
 
         self.hpke_key.remove(&leaf_node.public_key);
 
@@ -239,7 +254,7 @@ impl TreeIndex {
         }
 
         // Decrement credential type counters
-        let leaf_cred_type = leaf_node.signing_identity.credential.credential_type();
+        let leaf_cred_type = si.credential.credential_type();
 
         if let Some(counters) = self.credential_type_counters.get_mut(&leaf_cred_type) {
             counters.used -= 1;

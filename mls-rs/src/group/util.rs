@@ -58,8 +58,13 @@ pub(crate) async fn validate_group_info_member<C: CipherSuiteProvider>(
     group_info: &GroupInfo,
     cs: &C,
 ) -> Result<(), MlsError> {
-    let signer = &self_state.public_tree.get_leaf_node(group_info.signer)?;
-    validate_group_info_common(msg_version, group_info, &signer.signing_identity, cs).await?;
+    let signer_leaf = self_state.public_tree.get_leaf_node(group_info.signer)?;
+    let signer_si = signer_leaf
+        .signing_identity
+        .as_ref()
+        .ok_or(MlsError::InvalidGroupInfo)?;
+
+    validate_group_info_common(msg_version, group_info, signer_si, cs).await?;
 
     let self_tree = ExportedTree::new_borrowed(&self_state.public_tree.nodes);
 
@@ -88,11 +93,13 @@ pub(crate) async fn validate_tree_and_info_joiner<C: CipherSuiteProvider, I: Ide
 ) -> Result<TreeKemPublic, MlsError> {
     let public_tree = validate_tree_joiner(group_info, tree, id_provider, cs, maybe_time).await?;
 
-    let signer = &public_tree
-        .get_leaf_node(group_info.signer)?
-        .signing_identity;
+    let signer_leaf = public_tree.get_leaf_node(group_info.signer)?;
+    let signer_si = signer_leaf
+        .signing_identity
+        .as_ref()
+        .ok_or(MlsError::InvalidGroupInfo)?;
 
-    validate_group_info_joiner(msg_version, group_info, signer, id_provider, cs).await?;
+    validate_group_info_joiner(msg_version, group_info, signer_si, id_provider, cs).await?;
 
     Ok(public_tree)
 }

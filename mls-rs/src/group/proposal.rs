@@ -42,7 +42,9 @@ impl AddProposal {
     /// The [`SigningIdentity`] of the [`Member`](mls_rs_core::group::Member)
     /// that will be added by this proposal.
     pub fn signing_identity(&self) -> &SigningIdentity {
-        self.key_package.signing_identity()
+        self.key_package
+        .signing_identity()
+        .expect("KeyPackage must have signing_identity")
     }
 
     /// Client [`Capabilities`] of the [`Member`](mls_rs_core::group::Member)
@@ -96,7 +98,10 @@ impl UpdateProposal {
     /// The new [`SigningIdentity`] of the [`Member`](mls_rs_core::group::Member)
     /// that is being updated by this proposal.
     pub fn signing_identity(&self) -> &SigningIdentity {
-        &self.leaf_node.signing_identity
+      self.leaf_node
+        .signing_identity
+        .as_ref()
+        .expect("UpdateProposal leaf_node must have signing_identity")
     }
 
     /// New Client [`Capabilities`] of the [`Member`](mls_rs_core::group::Member)

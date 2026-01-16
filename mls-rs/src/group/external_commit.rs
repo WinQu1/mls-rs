@@ -199,7 +199,7 @@ impl<C: ClientConfig> ExternalCommitBuilder<C> {
         let (leaf_node, _) = LeafNode::generate(
             &cipher_suite,
             self.config.leaf_properties(self.leaf_node_extensions),
-            self.signing_identity,
+            Some(self.signing_identity),
             &self.signer,
             self.config.lifetime(self.commit_time),
         )

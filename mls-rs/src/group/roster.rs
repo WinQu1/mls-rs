@@ -9,14 +9,19 @@ use super::*;
 pub use mls_rs_core::group::Member;
 
 pub(crate) fn member_from_leaf_node(leaf_node: &LeafNode, leaf_index: LeafIndex) -> Member {
+    let signing_identity = leaf_node
+        .signing_identity
+        .clone()
+        .expect("Roster must not include ghost leaves");
+
     Member::new(
         *leaf_index,
-        leaf_node.signing_identity.clone(),
+        signing_identity,
         leaf_node.ungreased_capabilities(),
         leaf_node.ungreased_extensions(),
     )
 }
-
+   
 #[cfg_attr(
     all(feature = "ffi", not(test)),
     safer_ffi_gen::ffi_type(clone, opaque)
@@ -40,6 +45,7 @@ impl<'a> Roster<'a> {
     pub fn members_iter(&self) -> impl Iterator<Item = Member> + 'a {
         self.public_tree
             .non_empty_leaves()
+            .filter(|(_, node)| node.signing_identity.is_some())
             .map(|(index, node)| member_from_leaf_node(node, index))
     }
 
@@ -77,7 +83,7 @@ impl<'a> Roster<'a> {
     pub fn member_identities_iter(&self) -> impl Iterator<Item = &SigningIdentity> + '_ {
         self.public_tree
             .non_empty_leaves()
-            .map(|(_, node)| &node.signing_identity)
+            .filter_map(|(_, node)| node.signing_identity.as_ref())
     }
 }
 

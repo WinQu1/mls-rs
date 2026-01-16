@@ -106,7 +106,7 @@ where
         let (leaf_node, leaf_node_secret) = LeafNode::generate(
             self.cipher_suite_provider,
             properties,
-            self.signing_identity.clone(),
+            Some(self.signing_identity.clone()),
             self.signing_key,
             lifetime,
         )

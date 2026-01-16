@@ -107,8 +107,8 @@ impl KeyPackage {
         self.cipher_suite
     }
 
-    pub fn signing_identity(&self) -> &SigningIdentity {
-        &self.leaf_node.signing_identity
+    pub fn signing_identity(&self) -> Option<&SigningIdentity> {
+        self.leaf_node.signing_identity.as_ref()
     }
 
     #[cfg_attr(all(feature = "ffi", not(test)), safer_ffi_gen::safer_ffi_gen_ignore)]

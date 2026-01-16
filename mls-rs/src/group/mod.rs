@@ -307,7 +307,7 @@ where
         let (leaf_node, leaf_node_secret) = LeafNode::generate(
             &cipher_suite_provider,
             config.leaf_properties(leaf_node_extensions),
-            signing_identity,
+            Some(signing_identity),
             &signer,
             config.lifetime(maybe_now_time),
         )
@@ -771,7 +771,7 @@ where
     /// Signing identity currently in use by the local group instance.
     #[cfg_attr(all(feature = "ffi", not(test)), safer_ffi_gen::safer_ffi_gen_ignore)]
     pub fn current_member_signing_identity(&self) -> Result<&SigningIdentity, MlsError> {
-        self.current_user_leaf_node().map(|ln| &ln.signing_identity)
+        self.current_user_leaf_node()?.signing_identity_ref()
     }
 
     /// Member at a specific index in the group state.
@@ -2072,8 +2072,10 @@ impl<C: ClientConfig> Group<C> {
             .state
             .public_tree
             .leaves()
-            .map(|l| l.map(|n| n.signing_identity.signature_key.clone()))
-            .collect();
+            .map(|leaf_opt| {
+                    leaf_opt.and_then(|leaf| leaf.signing_identity.as_ref().map(|si| si.signature_key.clone()))
+            })
+            .collect::<Vec<Option<crate::crypto::SignaturePublicKey>>>();
 
         let past_epoch = PriorEpoch {
             context: self.context().clone(),
@@ -4197,7 +4199,7 @@ mod tests {
             )
             .into();
 
-            leaf.signing_identity.signature_key =
+            leaf.signature_key_ref()? =
                 hex!("cad4fc381fe61822af45135c82921a348e6f46643d66ddefc70483565433714b").into();
 
             Some(sk)
@@ -4214,7 +4216,7 @@ mod tests {
             )
             .into();
 
-            leaf.signing_identity.signature_key =
+            leaf.signature_key_ref()? =
                 hex!("cad4fc381fe61822af45135c82921a348e6f46643d66ddefc70483565433714b").into();
 
             Some(sk)

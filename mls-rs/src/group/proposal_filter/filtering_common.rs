@@ -566,14 +566,18 @@ async fn ensure_removal_is_for_self<C>(
 where
     C: IdentityProvider,
 {
-    let existing_signing_id = &tree.get_leaf_node(removal.to_remove)?.signing_identity;
+    let existing_signing_id = tree.get_leaf_node(removal.to_remove)?
+        .signing_identity
+        .as_ref()
+        .ok_or(MlsError::MemberNotFound)?;
+
+    let external_signing_id = external_leaf
+        .signing_identity
+        .as_ref()
+        .ok_or(MlsError::ExternalCommitMustHaveNewLeaf)?;
 
     identity_provider
-        .valid_successor(
-            existing_signing_id,
-            &external_leaf.signing_identity,
-            extensions,
-        )
+        .valid_successor(existing_signing_id, external_signing_id, extensions)
         .await
         .map_err(|e| MlsError::IdentityProviderError(e.into_any_error()))?
         .then_some(())

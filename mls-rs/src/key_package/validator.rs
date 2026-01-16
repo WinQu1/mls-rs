@@ -12,8 +12,14 @@ pub(crate) async fn validate_key_package_properties<CSP: CipherSuiteProvider>(
     version: ProtocolVersion,
     cs: &CSP,
 ) -> Result<(), MlsError> {
+    let signing_identity = package
+        .leaf_node
+        .signing_identity
+        .as_ref()
+        .ok_or(MlsError::InvalidLeafNodeSource)?;
+
     package
-        .verify(cs, &package.leaf_node.signing_identity.signature_key, &())
+        .verify(cs, &signing_identity.signature_key, &())
         .await?;
 
     // Verify that the protocol version matches

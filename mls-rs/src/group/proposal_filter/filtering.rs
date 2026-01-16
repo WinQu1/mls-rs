@@ -221,24 +221,34 @@ where
                             )),
                         )
                         .await;
+                    if res.is_err() {
+                        res
+                    } else{
+                        if matches!(leaf.leaf_node_source, crate::tree_kem::leaf_node::LeafNodeSource::Ghost) {
+                            Ok(())
+                        } else {
+                            let old_leaf = match self.original_tree.get_leaf_node(sender_index) {
+                                Ok(l) => l,
+                                Err(e) => return Some(Err(e)),
+                            };
 
-                    let old_leaf = match self.original_tree.get_leaf_node(sender_index) {
-                        Ok(leaf) => leaf,
-                        Err(e) => return Some(Err(e)),
-                    };
+                            let old_si = match old_leaf.signing_identity.as_ref() {
+                                Some(si) => si,
+                                None => return Some(Err(MlsError::InvalidLeafNodeSource)),
+                            };
 
-                    let valid_successor = self
-                        .identity_provider
-                        .valid_successor(
-                            &old_leaf.signing_identity,
-                            &leaf.signing_identity,
-                            new_extensions,
-                        )
-                        .await
-                        .map_err(|e| MlsError::IdentityProviderError(e.into_any_error()))
-                        .and_then(|valid| valid.then_some(()).ok_or(MlsError::InvalidSuccessor));
-
-                    res.and(valid_successor)
+                            let new_si = match leaf.signing_identity.as_ref() {
+                                Some(si) => si,
+                                None => return Some(Err(MlsError::InvalidLeafNodeSource)),
+                            };
+                            
+                            self.identity_provider
+                                .valid_successor(old_si, new_si, new_extensions)
+                                .await
+                                .map_err(|e| MlsError::IdentityProviderError(e.into_any_error()))
+                                .and_then(|valid| valid.then_some(()).ok_or(MlsError::InvalidSuccessor))
+                        }
+                    }
                 };
 
                 apply_strategy(strategy, p.is_by_reference(), res)

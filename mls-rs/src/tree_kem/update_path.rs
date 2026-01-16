@@ -77,16 +77,26 @@ pub(crate) async fn validate_update_path<C: IdentityProvider, CSP: CipherSuitePr
         let existing_leaf = state.public_tree.nodes.borrow_as_leaf(sender)?;
         let original_leaf_node = existing_leaf.clone();
 
-        identity_provider
-            .valid_successor(
-                &original_leaf_node.signing_identity,
-                &path.leaf_node.signing_identity,
-                &state.group_context.extensions,
-            )
-            .await
-            .map_err(|e| MlsError::IdentityProviderError(e.into_any_error()))?
-            .then_some(())
-            .ok_or(MlsError::InvalidSuccessor)?;
+        let old_si = original_leaf_node.signing_identity.as_ref();
+        let new_si = path.leaf_node.signing_identity.as_ref();
+
+        match (old_si, new_si) {
+            (Some(old_si), Some(new_si)) => {
+                identity_provider
+                    .valid_successor(old_si, new_si, &state.group_context.extensions)
+                    .await
+                    .map_err(|e| MlsError::IdentityProviderError(e.into_any_error()))?
+                    .then_some(())
+                    .ok_or(MlsError::InvalidSuccessor)?;
+            }
+            (None, None) => {
+                // Kotlin-like: ghost не несёт identity, successor не проверяем
+            }
+            _ => {
+                // identity появилась/исчезла => невалидный successor
+                return Err(MlsError::InvalidSuccessor);
+            }
+        }
 
         (existing_leaf.public_key != path.leaf_node.public_key)
             .then_some(())

@@ -154,10 +154,18 @@ impl TreeKemPublic {
         extensions: &ExtensionList,
     ) -> Result<Option<LeafIndex>, MlsError> {
         for (i, leaf) in self.nodes.non_empty_leaves() {
+            let Some(si) = leaf.signing_identity.as_ref() else {
+                continue; // ghost
+            };
+
             let leaf_id = id_provider
-                .identity(&leaf.signing_identity, extensions)
+                .identity(si, extensions)
                 .await
                 .map_err(|e| MlsError::IdentityProviderError(e.into_any_error()))?;
+
+            if leaf_id == identity {
+                return Ok(Some(i));
+            }
 
             if leaf_id == identity {
                 return Ok(Some(i));
@@ -286,10 +294,11 @@ impl TreeKemPublic {
         let original_leaf_node = existing_leaf.clone();
 
         #[cfg(feature = "tree_index")]
-        let original_identity = identity_provider
-            .identity(&original_leaf_node.signing_identity, extensions)
-            .await
-            .map_err(|e| MlsError::IdentityProviderError(e.into_any_error()))?;
+        let original_identity = identity(
+            &original_leaf_node.signing_identity,
+            &identity_provider,
+            extensions,
+        ).await?;
 
         *existing_leaf = update_path.leaf_node.clone();
 
@@ -303,7 +312,9 @@ impl TreeKemPublic {
         }
 
         #[cfg(feature = "tree_index")]
-        self.index.remove(&original_leaf_node, &original_identity);
+        if let Some(original_identity) = original_identity {
+            self.index.remove(&original_leaf_node, &original_identity);
+        }
 
         index_insert(
             #[cfg(feature = "tree_index")]
@@ -367,9 +378,9 @@ impl TreeKemPublic {
         #[cfg(feature = "tree_index")]
         if let Ok(old_leaf) = &res {
             // If this fails, it's not because the proposal is bad.
-            let identity = identity(&old_leaf.signing_identity, id_provider, extensions).await?;
-
-            self.index.remove(old_leaf, &identity);
+            if let Some(id) = identity(&old_leaf.signing_identity, id_provider, extensions).await? {
+                self.index.remove(&old_leaf, &id);
+            }
         }
 
         if is_by_value || !filter {
@@ -441,11 +452,9 @@ impl TreeKemPublic {
             match self.nodes.blank_leaf_node(index) {
                 Ok(old_leaf) => {
                     #[cfg(feature = "tree_index")]
-                    let old_id =
-                        identity(&old_leaf.signing_identity, id_provider, extensions).await?;
-
-                    #[cfg(feature = "tree_index")]
-                    self.index.remove(&old_leaf, &old_id);
+                    if let Some(id) = identity(&old_leaf.signing_identity, id_provider, extensions).await? {
+                        self.index.remove(&old_leaf, &id);
+                    }
 
                     partial_updates.push((index, old_leaf, new_leaf, i));
                 }
@@ -669,14 +678,20 @@ impl TreeKemPublic {
 #[cfg(feature = "tree_index")]
 #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
 async fn identity<I: IdentityProvider>(
-    signing_id: &SigningIdentity,
+    signing_id: &Option<SigningIdentity>,
     provider: &I,
     extensions: &ExtensionList,
-) -> Result<Vec<u8>, MlsError> {
-    provider
-        .identity(signing_id, extensions)
+) -> Result<Option<Vec<u8>>, MlsError> {
+    let Some(si) = signing_id.as_ref() else {
+        return Ok(None);
+    };
+
+    let id = provider
+        .identity(si, extensions)
         .await
-        .map_err(|e| MlsError::IdentityProviderError(e.into_any_error()))
+        .map_err(|e| MlsError::IdentityProviderError(e.into_any_error()))?;
+
+    Ok(Some(id))
 }
 
 #[cfg(feature = "std")]
@@ -994,7 +1009,7 @@ pub(crate) mod test_utils {
         let (leaf, _) = LeafNode::generate(
             cs,
             properties,
-            signing_identity,
+            Some(signing_identity),
             &signature_key,
             Lifetime::years(1, None).unwrap(),
         )

@@ -289,7 +289,9 @@ impl GroupState {
             Sender::External(_) => Err(MlsError::InvalidSender),
             Sender::NewMemberCommit => Ok(CommitSource::NewMember(
                 external_leaf
-                    .map(|l| l.signing_identity.clone())
+                    .ok_or(MlsError::ExternalCommitMustHaveNewLeaf)?
+                    .signing_identity
+                    .clone()
                     .ok_or(MlsError::ExternalCommitMustHaveNewLeaf)?,
             )),
         }?;
@@ -3043,7 +3045,7 @@ mod tests {
             let (leaf, secret) = LeafNode::generate(
                 &cipher_suite_provider,
                 properties,
-                signing_identity,
+                Some(signing_identity),
                 &signature_key,
                 Lifetime::years(1, None).unwrap(),
             )
