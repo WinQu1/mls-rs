@@ -3048,6 +3048,7 @@ mod tests {
                 Some(signing_identity),
                 &signature_key,
                 Lifetime::years(1, None).unwrap(),
+                0
             )
             .await
             .unwrap();

@@ -13,7 +13,9 @@ use mls_rs_core::identity::MemberValidationContext;
 use mls_rs_core::secret::Secret;
 use mls_rs_core::time::MlsTime;
 use snapshot::PendingCommitSnapshot;
-
+use super::{
+    mls_rules::CommitDirection,
+};
 use crate::cipher_suite::CipherSuite;
 use crate::client::MlsError;
 use crate::client_config::ClientConfig;
@@ -137,6 +139,10 @@ mod resumption;
 mod roster;
 pub(crate) mod snapshot;
 pub(crate) mod state;
+pub(crate) mod secret_sharing;
+#[cfg(feature = "private_message")]
+pub mod quarantine_messages;
+pub mod ghost_sharing;
 
 #[cfg(feature = "prior_epoch")]
 pub(crate) mod state_repo;
@@ -310,11 +316,12 @@ where
             Some(signing_identity),
             &signer,
             config.lifetime(maybe_now_time),
+            0
         )
         .await?;
-
+        let mew = &leaf_node;
         let (mut public_tree, private_tree) = TreeKemPublic::derive(
-            leaf_node,
+            mew.clone(),
             leaf_node_secret,
             &config.identity_provider(),
             &group_context_extensions,
@@ -466,7 +473,7 @@ where
         // index represent the index of this node among the leaves in the tree, namely the index of
         // the node in the tree array divided by two.
         let self_index = public_tree
-            .find_leaf_node(&key_package.leaf_node)
+            .find_leaf_node_for_welcome(&key_package.leaf_node)
             .ok_or(MlsError::WelcomeKeyPackageNotFound)?;
 
         #[cfg(not(feature = "last_resort_key_package_ext"))]
@@ -1029,6 +1036,9 @@ where
             )
             .await?;
 
+        new_leaf_node.epk = self.context().epoch;
+        new_leaf_node.equar = 0;
+
         // Store the secret key in the pending updates storage for later
         #[cfg(feature = "std")]
         self.pending_updates
@@ -1414,6 +1424,185 @@ where
         .await?;
 
         self.format_for_wire(auth_content).await
+    }
+
+    #[cfg(feature = "private_message")]
+    #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
+    pub async fn encrypt_quarantine_message(
+        &mut self,
+        msg: &crate::group::quarantine_messages::QuarantineAppMessage,
+        authenticated_data: Vec<u8>,
+    ) -> Result<MlsMessage, MlsError> {
+        let bytes = msg.encode_to_bytes()?;
+        self.encrypt_application_message(&bytes, authenticated_data).await
+    }
+
+    pub fn cache_received_ghost_shares(&mut self) {
+        self.private_tree.cache_received_ghost_shares();
+    }
+
+    pub fn try_recover_ghost_seed(
+        &self,
+        ghost_leaf: crate::tree_kem::node::LeafIndex,
+        key_epoch: u64,
+    ) -> Result<alloc::vec::Vec<u8>, MlsError> {
+        let t = self.config.ghost_sharing_params().threshold_t;
+        self.private_tree
+            .try_recover_ghost_seed(ghost_leaf, key_epoch, t)
+            .map_err(|e| MlsError::SerializationError(e.into_any_error()))
+    }
+
+    #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
+    pub async fn recover_ghost_keypair(
+        &self,
+        ghost_leaf: crate::tree_kem::node::LeafIndex,
+        key_epoch: u64,
+    ) -> Result<(HpkeSecretKey, HpkePublicKey), MlsError> {
+        let t = self.config.ghost_sharing_params().threshold_t;
+        self.private_tree
+            .recover_ghost_keypair(&self.cipher_suite_provider, ghost_leaf, key_epoch, t)
+            .await
+    }
+
+    #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
+    pub async fn recover_and_install_ghost_self_key(
+        &mut self,
+        ghost_leaf: crate::tree_kem::node::LeafIndex,
+        key_epoch: u64,
+    ) -> Result<(), MlsError> {
+        if self.private_tree.self_index != ghost_leaf {
+            return Err(MlsError::InvalidSender);
+        }
+
+        let (sk, pk) = self.recover_ghost_keypair(ghost_leaf, key_epoch).await?;
+
+        self.private_tree.install_self_leaf_secret_key(sk);
+        Ok(())
+    }
+
+    #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
+    pub async fn preapply_commit_public_only(
+        &mut self,
+        message: MlsMessage,
+    ) -> Result<(), MlsError> {
+        let plaintext = message.into_plaintext().ok_or(MlsError::UnexpectedMessageType)?;
+
+        if plaintext.content.group_id != self.state.context.group_id {
+            return Err(MlsError::GroupIdMismatch);
+        }
+
+        if plaintext.content.epoch != self.state.context.epoch {
+            return Err(MlsError::InvalidEpoch);
+        }
+
+        let commit = match plaintext.content.content {
+            Content::Commit(c) => c,
+            _ => return Err(MlsError::UnexpectedMessageType),
+        };
+
+        #[cfg(feature = "by_ref_proposal")]
+        let proposals = self
+            .state
+            .proposals
+            .resolve_for_commit(plaintext.content.sender, commit.proposals)?;
+
+        #[cfg(not(feature = "by_ref_proposal"))]
+        let proposals = crate::group::proposal_cache::resolve_for_commit(
+            plaintext.content.sender,
+            commit.proposals,
+        )?;
+
+        let mut provisional_state = self
+            .state
+            .apply_resolved(
+                plaintext.content.sender,
+                proposals,
+                commit.path.as_ref().map(|p| &p.leaf_node),
+                &self.identity_provider(),
+                &self.cipher_suite_provider,
+                &self.psk_storage(),
+                &self.mls_rules(),
+                None,
+                CommitDirection::Receive,
+            )
+            .await?;
+
+        let sender = commit_sender(&plaintext.content.sender, &provisional_state)?;
+
+        provisional_state
+            .public_tree
+            .update_hashes(&[sender], &self.cipher_suite_provider)
+            .await?;
+
+        self.state.public_tree = provisional_state.public_tree;
+
+        Ok(())
+    }
+
+    #[cfg(feature = "private_message")]
+    #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
+    pub async fn handle_quarantine_application_message(
+        &mut self,
+        sender_rank: u32,
+        data: &[u8],
+    ) -> Result<Option<MlsMessage>, MlsError> {
+        use crate::group::quarantine_messages::{
+            QuarantineAppMessage, QuarantineEnd, ShareRecovery, ShareResend,
+        };
+
+        let msg = QuarantineAppMessage::decode_from_bytes(data)?;
+        match msg {
+            QuarantineAppMessage::QuarantineEnd(QuarantineEnd { ghost_leaf, key_epoch }) => {
+                self.private_tree
+                    .ghost_share_holders
+                    .retain(|s| !(s.ghost_leaf == ghost_leaf && s.key_epoch == key_epoch));
+                Ok(None)
+            }
+            QuarantineAppMessage::ShareRecovery(ShareRecovery {
+                ghost_leaf,
+                key_epoch,
+                requester_rank,
+            }) => {
+                let shares = self.private_tree.ghost_shares_for(ghost_leaf, key_epoch);
+                if shares.is_empty() {
+                    return Ok(None);
+                }
+
+                let resend = QuarantineAppMessage::ShareResend(ShareResend {
+                    ghost_leaf,
+                    key_epoch,
+                    target_rank: requester_rank,
+                    shares,
+                });
+
+                let out = self.encrypt_quarantine_message(&resend, Vec::new()).await?;
+                Ok(Some(out))
+            }
+            QuarantineAppMessage::ShareResend(ShareResend {
+                ghost_leaf: _,
+                key_epoch: _,
+                target_rank,
+                shares,
+            }) => {
+                if target_rank != *self.private_tree.self_index {
+                    return Ok(None);
+                }
+
+                for share in shares {
+                    let exists = self.private_tree.ghost_share_holders.iter().any(|x| {
+                        x.ghost_leaf == share.ghost_leaf
+                            && x.key_epoch == share.key_epoch
+                            && x.share_id == share.share_id
+                            && x.holder_rank == share.holder_rank
+                    });
+                    if !exists {
+                        self.private_tree.ghost_share_holders.push(share);
+                    }
+                }
+                let _ = sender_rank;
+                Ok(None)
+            }
+        }
     }
 
     #[cfg(feature = "private_message")]
@@ -4198,9 +4387,7 @@ mod tests {
                 "3468b4c890255c983e3d5cbf5cb64c1ef7f6433a518f2f3151d6672f839a06ebcad4fc381fe61822af45135c82921a348e6f46643d66ddefc70483565433714b"
             )
             .into();
-
-            leaf.signature_key_ref()? =
-                hex!("cad4fc381fe61822af45135c82921a348e6f46643d66ddefc70483565433714b").into();
+            leaf.signing_identity.as_mut().expect("non-ghost leaf must have signing_identity in this test").signature_key = hex!("cad4fc381fe61822af45135c82921a348e6f46643d66ddefc70483565433714b").into();
 
             Some(sk)
         };
@@ -4215,9 +4402,7 @@ mod tests {
                 "3468b4c890255c983e3d5cbf5cb64c1ef7f6433a518f2f3151d6672f839a06ebcad4fc381fe61822af45135c82921a348e6f46643d66ddefc70483565433714b"
             )
             .into();
-
-            leaf.signature_key_ref()? =
-                hex!("cad4fc381fe61822af45135c82921a348e6f46643d66ddefc70483565433714b").into();
+            leaf.signing_identity.as_mut().expect("non-ghost leaf must have signing_identity in this test").signature_key = hex!("cad4fc381fe61822af45135c82921a348e6f46643d66ddefc70483565433714b").into();
 
             Some(sk)
         };
@@ -4313,10 +4498,9 @@ mod tests {
         }
 
         groups[0].commit_modifiers.modify_leaf = |leaf, sk| {
-            leaf.signing_identity.credential = Credential::Custom(CustomCredential::new(
+            leaf.signing_identity.as_mut().expect("expected signing identity for non-ghost leaf").credential = Credential::Custom(CustomCredential::new(
                 CredentialType::new(43),
-                leaf.signing_identity
-                    .credential
+                leaf.signing_identity.as_ref().expect("expected signing identity for non-ghost leaf").credential
                     .as_basic()
                     .unwrap()
                     .identifier

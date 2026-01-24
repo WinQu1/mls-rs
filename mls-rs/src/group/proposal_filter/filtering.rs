@@ -156,15 +156,23 @@ where
         new_extensions: &ExtensionList,
         commit_time: Option<MlsTime>,
     ) -> Result<ApplyProposalsOutput, MlsError> {
-        let mut applied_proposals = self
+        let applied_proposals = self
             .validate_new_nodes(strategy, proposals, new_extensions, commit_time)
             .await?;
 
         let mut new_tree = self.original_tree.clone();
 
+        let mut tree_proposals = applied_proposals.clone();
+
+        let next_epoch = self.original_context.epoch + 1;
+        for add in tree_proposals.additions.iter_mut() {
+            add.proposal.key_package.leaf_node.epk = next_epoch;
+            add.proposal.key_package.leaf_node.equar = 0;
+        }
+
         let added = new_tree
             .batch_edit(
-                &mut applied_proposals,
+                &mut tree_proposals,
                 new_extensions,
                 self.identity_provider,
                 self.cipher_suite_provider,
@@ -361,7 +369,7 @@ fn filter_out_update_for_committer(
     mut proposals: ProposalBundle,
 ) -> Result<ProposalBundle, MlsError> {
     proposals.retain_by_type::<UpdateProposal, _, _>(|p| {
-        apply_strategy(
+       apply_strategy(
             strategy,
             p.is_by_reference(),
             (p.sender != Sender::Member(*commit_sender))
@@ -616,7 +624,7 @@ pub(crate) fn filter_out_invalid_proposers(
     for i in (0..proposals.update_proposals().len()).rev() {
         let p = &proposals.update_proposals()[i];
         let res = proposer_can_propose(p.sender, ProposalType::UPDATE, &p.source);
-
+        
         if !apply_strategy(strategy, p.is_by_reference(), res)? {
             proposals.remove::<UpdateProposal>(i);
             proposals.update_senders.remove(i);

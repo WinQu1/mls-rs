@@ -198,6 +198,7 @@ mod tests {
             node::{LeafIndex, Node, Parent},
             parent_hash::{test_utils::get_test_tree_fig_12, ParentHash},
             test_utils::get_test_tree,
+            path_secret::GhostShare
         },
     };
 
@@ -220,6 +221,10 @@ mod tests {
         let cipher_suite_provider = test_cipher_suite_provider(cipher_suite);
 
         let mut test_tree = get_test_tree(cipher_suite).await;
+
+        let self_index = test_tree.private.self_index;
+        let path_len = test_tree.public.nodes.direct_copath(self_index).len();
+        let ghost_shares_per_path_pos: Vec<Vec<GhostShare>> = vec![Vec::new(); path_len];
 
         let leaf1 = get_basic_test_node(cipher_suite, "leaf1").await;
         let leaf2 = get_basic_test_node(cipher_suite, "leaf2").await;
@@ -245,6 +250,7 @@ mod tests {
                 Some(default_properties()),
                 None,
                 &cipher_suite_provider,
+                &ghost_shares_per_path_pos,
                 #[cfg(test)]
                 &Default::default(),
             )

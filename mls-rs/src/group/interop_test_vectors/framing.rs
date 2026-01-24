@@ -335,6 +335,7 @@ async fn generate_framing_test_vector() -> Vec<FramingTestCase> {
         let commit = Commit {
             proposals: vec![],
             path: None,
+            ghost_updates: Vec::new(),
         };
 
         test_case.commit = commit.mls_encode_to_vec().unwrap();

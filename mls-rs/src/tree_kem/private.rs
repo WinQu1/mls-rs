@@ -5,8 +5,11 @@ use alloc::{vec, vec::Vec};
 
 use mls_rs_codec::{MlsDecode, MlsEncode, MlsSize};
 use mls_rs_core::crypto::HpkeSecretKey;
+use mls_rs_core::error::IntoAnyError;
 
 use crate::{client::MlsError, crypto::CipherSuiteProvider};
+use crate::tree_kem::path_secret::GhostShare;
+use crate::group::secret_sharing::{recover_seed_bytes, ShareBytes, SecretSharingError};
 
 use super::{
     math::leaf_lca_level,
@@ -16,11 +19,23 @@ use super::{
 };
 
 #[derive(Clone, Debug, MlsEncode, MlsDecode, MlsSize, Eq, PartialEq)]
+pub struct GhostShareHolder {
+    pub ghost_leaf: LeafIndex,
+    pub key_epoch: u64,
+    pub share_id: u8,
+    pub holder_rank: u32,
+    #[mls_codec(with = "mls_rs_codec::byte_vec")]
+    pub share_value: Vec<u8>,
+}
+
+#[derive(Clone, Debug, MlsEncode, MlsDecode, MlsSize, Eq, PartialEq)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 #[non_exhaustive]
 pub struct TreeKemPrivate {
     pub self_index: LeafIndex,
     pub secret_keys: Vec<Option<HpkeSecretKey>>,
+    pub received_ghost_shares: Vec<GhostShare>,
+    pub ghost_share_holders: Vec<GhostShareHolder>
 }
 
 impl TreeKemPrivate {
@@ -28,6 +43,8 @@ impl TreeKemPrivate {
         TreeKemPrivate {
             self_index,
             secret_keys: vec![Some(leaf_secret)],
+            received_ghost_shares: Vec::new(),
+            ghost_share_holders: Vec::new(),
         }
     }
 
@@ -35,7 +52,96 @@ impl TreeKemPrivate {
         TreeKemPrivate {
             self_index: LeafIndex::unchecked(0),
             secret_keys: Default::default(),
+            received_ghost_shares: Vec::new(),
+            ghost_share_holders: Vec::new(),
         }
+    }
+    pub fn take_received_ghost_shares(&mut self) -> Vec<GhostShare> {
+        core::mem::take(&mut self.received_ghost_shares)
+    }
+
+    pub fn cache_received_ghost_shares(&mut self) {
+        let newly_received = self.take_received_ghost_shares();
+        if newly_received.is_empty() {
+            return;
+        }
+
+        for s in newly_received {
+            let holder = GhostShareHolder {
+                ghost_leaf: s.ghost_leaf,
+                key_epoch: s.key_epoch,
+                share_id: s.share_id,
+                holder_rank: *self.self_index,
+                share_value: s.share_value,
+            };
+
+            let exists = self.ghost_share_holders.iter().any(|x| {
+                x.ghost_leaf == holder.ghost_leaf
+                    && x.key_epoch == holder.key_epoch
+                    && x.share_id == holder.share_id
+                    && x.holder_rank == holder.holder_rank
+            });
+            if !exists {
+                self.ghost_share_holders.push(holder);
+            }
+        }
+    }
+
+    pub fn ghost_shares_for(&self, ghost_leaf: LeafIndex, key_epoch: u64) -> Vec<GhostShareHolder> {
+        self.ghost_share_holders
+            .iter()
+            .filter(|s| s.ghost_leaf == ghost_leaf && s.key_epoch == key_epoch)
+            .cloned()
+            .collect()
+    }
+
+    pub fn try_recover_ghost_seed(
+        &self,
+        ghost_leaf: LeafIndex,
+        key_epoch: u64,
+        threshold: u8,
+    ) -> Result<Vec<u8>, SecretSharingError> {
+        if threshold == 0 {
+            return Err(SecretSharingError::InvalidThreshold);
+        }
+
+        let mut unique: Vec<ShareBytes> = Vec::new();
+        for h in self
+            .ghost_share_holders
+            .iter()
+            .filter(|s| s.ghost_leaf == ghost_leaf && s.key_epoch == key_epoch)
+        {
+            if unique.iter().any(|x| x.id == h.share_id) {
+                continue;
+            }
+            unique.push(ShareBytes {
+                id: h.share_id,
+                bytes: h.share_value.clone(),
+            });
+            if unique.len() >= threshold as usize {
+                break;
+            }
+        }
+
+        recover_seed_bytes(threshold, &unique)
+    }
+
+    #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
+    pub async fn recover_ghost_keypair<P: CipherSuiteProvider>(
+        &self,
+        cipher_suite_provider: &P,
+        ghost_leaf: LeafIndex,
+        key_epoch: u64,
+        threshold: u8,
+    ) -> Result<(HpkeSecretKey, crate::crypto::HpkePublicKey), MlsError> {
+        let seed = self
+            .try_recover_ghost_seed(ghost_leaf, key_epoch, threshold)
+            .map_err(|e| MlsError::SerializationError(e.into_any_error()))?;
+
+        cipher_suite_provider
+            .kem_derive(&seed)
+            .await
+            .map_err(|e| MlsError::CryptoProviderError(e.into_any_error()))
     }
 
     #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
@@ -89,6 +195,13 @@ impl TreeKemPrivate {
 
         Ok(())
     }
+    pub(crate) fn install_self_leaf_secret_key(&mut self, sk: HpkeSecretKey) {
+        if self.secret_keys.is_empty() {
+            self.secret_keys.push(Some(sk));
+        } else {
+            self.secret_keys[0] = Some(sk);
+        }
+    }
 
     #[cfg(feature = "by_ref_proposal")]
     pub fn update_leaf(&mut self, new_leaf: HpkeSecretKey) {
@@ -103,6 +216,8 @@ impl TreeKemPrivate {
         TreeKemPrivate {
             self_index,
             secret_keys: Default::default(),
+            received_ghost_shares: Vec::new(),
+            ghost_share_holders: Vec::new(),
         }
     }
 }
@@ -191,6 +306,8 @@ mod tests {
 
         // Alice's secret key is longer now
         alice_private.secret_keys.resize(3, None);
+        let path_len = public_tree.nodes.direct_copath(LeafIndex::unchecked(0)).len();
+        let ghost_shares_per_path_pos: Vec<Vec<GhostShare>> = vec![Vec::new(); path_len];
 
         // Generate an update path for Alice
         let encap_gen = TreeKem::new(&mut public_tree, &mut alice_private)
@@ -201,6 +318,7 @@ mod tests {
                 Some(default_properties()),
                 None,
                 &cipher_suite_provider,
+                &ghost_shares_per_path_pos,
                 #[cfg(test)]
                 &Default::default(),
             )

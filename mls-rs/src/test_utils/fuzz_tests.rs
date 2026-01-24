@@ -76,6 +76,7 @@ pub fn create_fuzz_commit_message(
         Content::Commit(alloc::boxed::Box::new(Commit {
             proposals: Vec::new(),
             path: None,
+            ghost_updates: Vec::new(),
         })),
         &group.signer,
         wire_format,

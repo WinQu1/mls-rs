@@ -109,6 +109,7 @@ where
             Some(self.signing_identity.clone()),
             self.signing_key,
             lifetime,
+            0
         )
         .await?;
 

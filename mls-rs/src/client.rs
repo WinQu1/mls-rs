@@ -356,6 +356,8 @@ pub enum MlsError {
     SelfRemoveAlreadyProposed,
     #[cfg_attr(feature = "std", error("Default value listed"))]
     DefaultValueListed,
+    #[cfg_attr(feature = "std", error("ghost_shares_per_path_pos length mismatch"))]
+    GhostSharesPerPath,
 }
 
 impl IntoAnyError for MlsError {
@@ -974,11 +976,15 @@ mod tests {
             assert_eq!(key_package.cipher_suite, cipher_suite);
 
             assert_eq!(
-                &key_package.leaf_node.signing_identity.credential,
+                &key_package.leaf_node
+                    .signing_identity
+                    .as_ref()
+                    .expect("KeyPackage leaf must have a signing identity")
+                    .credential,
                 &get_test_basic_credential(b"foo".to_vec())
             );
 
-            assert_eq!(key_package.leaf_node.signing_identity, identity);
+            assert_eq!(key_package.leaf_node.signing_identity, Some(identity));
 
             let capabilities = key_package.leaf_node.ungreased_capabilities();
             assert_eq!(capabilities, client.config.capabilities());
@@ -1020,7 +1026,7 @@ mod tests {
             message,
             ReceivedMessage::Proposal(ProposalMessageDescription {
                 proposal: Proposal::Add(p), ..}
-            ) if p.key_package.leaf_node.signing_identity == bob_identity
+            ) if p.key_package.leaf_node.signing_identity.as_ref() == Some(&bob_identity)
         );
 
         alice_group.commit(vec![]).await.unwrap();

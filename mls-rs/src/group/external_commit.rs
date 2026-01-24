@@ -195,6 +195,7 @@ impl<C: ClientConfig> ExternalCommitBuilder<C> {
             self.commit_time,
         )
         .await?;
+        let initial_epk = group_info.group_context.epoch + 1;
 
         let (leaf_node, _) = LeafNode::generate(
             &cipher_suite,
@@ -202,6 +203,7 @@ impl<C: ClientConfig> ExternalCommitBuilder<C> {
             Some(self.signing_identity),
             &self.signer,
             self.config.lifetime(self.commit_time),
+            initial_epk
         )
         .await?;
 

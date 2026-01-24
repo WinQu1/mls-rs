@@ -25,6 +25,38 @@ pub struct PathSecret(
     Zeroizing<Vec<u8>>,
 );
 
+use crate::tree_kem::node::LeafIndex;
+
+#[derive(Clone, Debug, PartialEq, Eq, MlsSize, MlsEncode, MlsDecode)]
+pub struct GhostShare {
+    pub ghost_leaf: LeafIndex,
+    pub key_epoch: u64,
+    pub share_id: u8,
+    #[mls_codec(with = "mls_rs_codec::byte_vec")]
+    pub share_value: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, MlsSize, MlsEncode, MlsDecode)]
+pub struct EncryptedPathSecretContent {
+    pub path_secret: PathSecret,
+    pub ghost_shares: Vec<GhostShare>,
+}
+
+impl super::hpke_encryption::HpkeEncryptable for EncryptedPathSecretContent {
+    const ENCRYPT_LABEL: &'static str = "UpdatePathNode";
+
+    fn from_bytes(bytes: Vec<u8>) -> Result<Self, crate::client::MlsError> {
+        let mut slice = bytes.as_slice();
+        EncryptedPathSecretContent::mls_decode(&mut slice)
+            .map_err(|e| MlsError::CryptoProviderError(e.into_any_error()))
+    }
+
+    fn get_bytes(&self) -> Result<Vec<u8>, crate::client::MlsError> {
+        self.mls_encode_to_vec()
+            .map_err(|e| MlsError::CryptoProviderError(e.into_any_error()))
+    }
+}
+
 impl Debug for PathSecret {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("PathSecret").finish()

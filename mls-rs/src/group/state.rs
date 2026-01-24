@@ -39,6 +39,11 @@ impl GroupState {
 
 #[cfg_attr(all(feature = "ffi", not(test)), safer_ffi_gen::safer_ffi_gen)]
 impl GroupState {
+
+    pub(crate) const INACTIVITY_DELAY: u64 = 10;
+    pub(crate) const GHOST_KEY_UPDATE_DELAY: u64 = 10;
+    pub(crate) const DELETE_FROM_QUARANTINE_DELAY: u64 = 40;
+    
     pub fn member_at_index(&self, index: u32) -> Option<Member> {
         let Ok(leaf_index) = LeafIndex::try_from(index) else {
             return None;

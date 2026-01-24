@@ -178,7 +178,7 @@ async fn interop_passive_client() {
         }
 
         let client = client_builder
-            .signing_identity(id, key, cs.cipher_suite())
+            .signing_identity(id.expect("interop test vectors must include signing identity"), key, cs.cipher_suite())
             .build();
 
         let key_pckg_gen = KeyPackageGeneration {

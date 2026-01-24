@@ -754,6 +754,33 @@ pub(crate) trait MessageProcessor: Send + Sync {
             )
             .await?;
 
+        if !commit.ghost_updates.is_empty() {
+            let mut updated_leaves = Vec::with_capacity(commit.ghost_updates.len());
+
+            for gu in commit.ghost_updates.iter() {
+                if let Ok(leaf) = provisional_state
+                    .public_tree
+                    .nodes
+                    .borrow_as_leaf_mut(gu.leaf_index)
+                {
+                    *leaf = gu.leaf_node.clone();
+                    updated_leaves.push(gu.leaf_index);
+                }
+            }
+
+            if !updated_leaves.is_empty() {
+                provisional_state
+                    .public_tree
+                    .update_hashes(&updated_leaves, self.cipher_suite_provider())
+                    .await?;
+
+                provisional_state.group_context.tree_hash = provisional_state
+                    .public_tree
+                    .tree_hash(self.cipher_suite_provider())
+                    .await?;
+            }
+        }
+
         let sender = commit_sender(&auth_content.content.sender, &provisional_state)?;
 
         //Verify that the path value is populated if the proposals vector contains any Update

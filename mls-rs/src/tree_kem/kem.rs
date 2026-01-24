@@ -28,7 +28,7 @@ use super::leaf_node::ConfigProperties;
 use super::node::NodeTypeResolver;
 use super::{
     node::{LeafIndex, NodeIndex},
-    path_secret::{PathSecret, PathSecretGenerator},
+    path_secret::{PathSecret, PathSecretGenerator, EncryptedPathSecretContent, GhostShare},
     TreeKemPrivate, TreeKemPublic, UpdatePath, UpdatePathNode, ValidatedUpdatePath,
 };
 
@@ -67,6 +67,7 @@ impl<'a> TreeKem<'a> {
         update_leaf_properties: Option<ConfigProperties>,
         signing_identity: Option<SigningIdentity>,
         cipher_suite_provider: &P,
+        ghost_shares_per_path_pos: &[Vec<GhostShare>],
         #[cfg(test)] commit_modifiers: &CommitModifiers,
     ) -> Result<EncapGeneration, MlsError>
     where
@@ -106,6 +107,10 @@ impl<'a> TreeKem<'a> {
 
         let update_path_leaf = {
             let own_leaf = self.tree_kem_public.nodes.borrow_as_leaf_mut(self_index)?;
+            // QTreeKEM: if this member was quarantined (ghost), a self-update commit reactivates it.
+            own_leaf.equar = 0;
+
+            own_leaf.epk = context.epoch + 1;
 
             self.private_key.secret_keys[0] = Some(
                 own_leaf
@@ -144,11 +149,14 @@ impl<'a> TreeKem<'a> {
             .await?;
 
         let context_bytes = context.mls_encode_to_vec()?;
-
+        if ghost_shares_per_path_pos.len() != path.len() {
+            return Err(MlsError::GhostSharesPerPath);
+        }
         let node_updates = self
             .encrypt_path_secrets(
                 path,
                 &path_secrets,
+                ghost_shares_per_path_pos,
                 &context_bytes,
                 cipher_suite_provider,
                 excluding,
@@ -177,6 +185,7 @@ impl<'a> TreeKem<'a> {
         &self,
         path: Vec<CopathNode<NodeIndex>>,
         path_secrets: &[Option<PathSecret>],
+        ghost_shares_per_path_pos: &[Vec<GhostShare>],
         context_bytes: &[u8],
         cipher_suite: &P,
         excluding: &[LeafIndex],
@@ -190,12 +199,13 @@ impl<'a> TreeKem<'a> {
 
         let mut node_updates = Vec::new();
 
-        for (index, path_secret) in path.into_iter().zip(path_secrets.iter()) {
+        for ((index, path_secret), shares) in path.into_iter().zip(path_secrets.iter()).zip(ghost_shares_per_path_pos.iter()) {
             if let Some(path_secret) = path_secret {
                 node_updates.push(
                     self.encrypt_copath_node_resolution(
                         cipher_suite,
                         path_secret,
+                        shares,
                         index.copath,
                         context_bytes,
                         &excluding,
@@ -213,6 +223,7 @@ impl<'a> TreeKem<'a> {
         &self,
         path: Vec<CopathNode<NodeIndex>>,
         path_secrets: &[Option<PathSecret>],
+        ghost_shares_per_path_pos: &[Vec<GhostShare>],
         context_bytes: &[u8],
         cipher_suite: &P,
         excluding: &[LeafIndex],
@@ -226,11 +237,13 @@ impl<'a> TreeKem<'a> {
 
         path.into_par_iter()
             .zip(path_secrets.par_iter())
-            .filter_map(|(node, path_secret)| {
+            .zip(ghost_shares_per_path_pos.par_iter())
+            .filter_map(|((node, path_secret), shares)| {
                 path_secret.as_ref().map(|path_secret| {
                     self.encrypt_copath_node_resolution(
                         cipher_suite,
                         path_secret,
+                        shares,
                         node.copath,
                         context_bytes,
                         &excluding,
@@ -286,9 +299,20 @@ impl<'a> TreeKem<'a> {
             .ok_or(MlsError::UpdateErrorNoSecretKey)?
             .public_key();
 
-        let lca_path_secret =
-            PathSecret::decrypt(cipher_suite_provider, secret, public, context_bytes, ct).await?;
-
+        let content = EncryptedPathSecretContent::decrypt(
+            cipher_suite_provider,
+            secret,
+            public,
+            context_bytes,
+            ct,
+        )
+        .await?;
+        if !content.ghost_shares.is_empty() {
+            self.private_key
+                .received_ghost_shares
+                .extend(content.ghost_shares.iter().cloned());
+        }
+        let lca_path_secret = content.path_secret;
         // Derive the rest of the secrets for the tree and assign to the proper nodes
         let mut node_secret_gen =
             PathSecretGenerator::starting_with(cipher_suite_provider, lca_path_secret);
@@ -323,6 +347,7 @@ impl<'a> TreeKem<'a> {
         &self,
         cipher_suite_provider: &P,
         path_secret: &PathSecret,
+        ghost_shares: &[GhostShare],
         copath_index: NodeIndex,
         context: &[u8],
         #[cfg(feature = "std")] excluding: &HashSet<NodeIndex>,
@@ -339,8 +364,11 @@ impl<'a> TreeKem<'a> {
                 .nodes
                 .borrow_node(idx)?
                 .as_non_empty()?;
-
-            path_secret
+            let content = EncryptedPathSecretContent {
+                path_secret: path_secret.clone(),
+                ghost_shares: ghost_shares.to_vec(),
+            };
+            content
                 .encrypt(cipher_suite_provider, node.public_key(), context)
                 .await
         };
@@ -427,6 +455,7 @@ mod tests {
                 ConfigProperties,
             },
             node::LeafIndex,
+            path_secret::GhostShare,
             Capabilities, TreeKemPrivate, TreeKemPublic, UpdatePath, ValidatedUpdatePath,
         },
         ExtensionList,
@@ -577,7 +606,8 @@ mod tests {
             capabilities: capabilities.clone().unwrap_or_else(get_test_capabilities),
             extensions: extensions.clone().unwrap_or_default(),
         };
-
+        let path_len = encap_tree.nodes.direct_copath(LeafIndex::unchecked(0)).len();
+        let ghost_shares_per_path_pos: Vec<Vec<GhostShare>> = vec![Vec::new(); path_len];
         // Perform the encap function
         let encap_gen = TreeKem::new(&mut encap_tree, &mut encap_private_key)
             .encap(
@@ -587,6 +617,7 @@ mod tests {
                 Some(update_leaf_properties),
                 None,
                 &cipher_suite_provider,
+                &ghost_shares_per_path_pos,
                 #[cfg(test)]
                 &Default::default(),
             )

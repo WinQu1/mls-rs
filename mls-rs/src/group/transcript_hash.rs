@@ -211,6 +211,7 @@ mod tests {
             let commit = Commit {
                 proposals: vec![proposal],
                 path: None,
+                ghost_updates: Vec::new(),
             };
 
             let signer = cs.signature_key_generate().unwrap().0;

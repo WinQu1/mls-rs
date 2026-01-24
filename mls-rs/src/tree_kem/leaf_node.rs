@@ -33,7 +33,7 @@ pub struct LeafNode {
     pub leaf_node_source: LeafNodeSource,
     pub extensions: ExtensionList,
     pub epk: u64,
-    pub equar: Option<u64>,
+    pub equar: u64,
     #[mls_codec(with = "mls_rs_codec::byte_vec")]
     #[cfg_attr(feature = "serde", serde(with = "mls_rs_core::vec_serde"))]
     pub signature: Vec<u8>,
@@ -69,6 +69,7 @@ impl LeafNode {
         signing_identity: Option<SigningIdentity>,
         signer: &SignatureSecretKey,
         lifetime: Lifetime,
+        epk: u64,
     ) -> Result<(Self, HpkeSecretKey), MlsError>
     where
         CSP: CipherSuiteProvider,
@@ -83,8 +84,8 @@ impl LeafNode {
             signing_identity,
             capabilities: properties.capabilities,
             leaf_node_source: LeafNodeSource::KeyPackage(lifetime),
-            epk: 0,
-            equar: None,
+            epk: epk,
+            equar: 0,
             extensions: properties.extensions,
             signature: Default::default(),
         };
@@ -178,11 +179,27 @@ impl LeafNode {
 
         Ok(secret)
     }
+    pub fn is_ghost(&self) -> bool {
+        self.equar != 0
+    }
 
-    pub fn mark_as_ghost(&mut self) {
+    pub fn mark_as_ghost(&mut self, epoch: u64) {
         self.leaf_node_source = LeafNodeSource::Ghost;
         self.signing_identity = None;
-        self.signature = alloc::vec![0u8]; 
+        self.signature = vec![0u8]; 
+        self.equar = epoch;
+        self.epk = epoch;
+    }
+
+    pub fn refresh_ghost_key(&mut self, epoch: u64) {
+        self.leaf_node_source = LeafNodeSource::Ghost;
+        self.signing_identity = None;
+        self.signature = alloc::vec![0u8];
+        self.epk = epoch;
+    }
+
+    pub fn set_epk(&mut self, epoch: u64) {
+        self.epk = epoch;
     }
 
     pub fn signing_identity_ref(&self) -> Result<&SigningIdentity, MlsError> {
@@ -209,8 +226,6 @@ struct LeafNodeTBS<'a> {
     extensions: &'a ExtensionList,
     group_id: Option<&'a [u8]>,
     leaf_index: Option<u32>,
-    pub epk: u64,
-    pub equar: &'a Option<u64>,
 }
 
 impl MlsSize for LeafNodeTBS<'_> {
@@ -219,8 +234,6 @@ impl MlsSize for LeafNodeTBS<'_> {
             + self.signing_identity.mls_encoded_len()
             + self.capabilities.mls_encoded_len()
             + self.leaf_node_source.mls_encoded_len()
-            + self.epk.mls_encoded_len()
-            + self.equar.mls_encoded_len()
             + self.extensions.mls_encoded_len()
             + self
                 .group_id
@@ -236,8 +249,6 @@ impl MlsEncode for LeafNodeTBS<'_> {
         self.signing_identity.mls_encode(writer)?;
         self.capabilities.mls_encode(writer)?;
         self.leaf_node_source.mls_encode(writer)?;
-        self.epk.mls_encode(writer)?;
-        self.equar.mls_encode(writer)?;
         self.extensions.mls_encode(writer)?;
 
         if let Some(ref group_id) = self.group_id {
@@ -288,8 +299,6 @@ impl<'a> Signable<'a> for LeafNode {
             extensions: &self.extensions,
             group_id: context.group_id,
             leaf_index: context.leaf_index,
-            epk: self.epk,
-            equar: &self.equar,
         }
         .mls_encode_to_vec()
     }
@@ -354,6 +363,7 @@ pub(crate) mod test_utils {
             signing_identity,
             secret,
             lifetime,
+            0
         )
         .await
         .unwrap()
@@ -391,6 +401,7 @@ pub(crate) mod test_utils {
             Some(signing_identity),
             &signature_key,
             Lifetime::years(1, None).unwrap(),
+            0
         )
         .await
         .map(|(leaf, hpke_secret_key)| (leaf, hpke_secret_key, signature_key))

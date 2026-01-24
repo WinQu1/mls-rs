@@ -4,7 +4,7 @@
 
 use crate::{
     extension::ExtensionType,
-    group::{mls_rules::MlsRules, proposal::ProposalType},
+    group::{mls_rules::MlsRules, proposal::ProposalType, ghost_sharing::GhostSharingParams},
     identity::CredentialType,
     protocol_version::ProtocolVersion,
     time::MlsTime,
@@ -63,5 +63,9 @@ pub trait ClientConfig: Send + Sync + Clone {
             capabilities: self.capabilities(),
             extensions: leaf_node_extensions,
         }
+    }
+
+    fn ghost_sharing_params(&self) -> GhostSharingParams {
+        GhostSharingParams::default()
     }
 }

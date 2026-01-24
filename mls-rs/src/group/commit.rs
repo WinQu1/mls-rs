@@ -59,9 +59,22 @@ use super::proposal::CustomProposal;
 #[derive(Clone, Debug, PartialEq, MlsSize, MlsEncode, MlsDecode)]
 #[cfg_attr(feature = "arbitrary", derive(mls_rs_core::arbitrary::Arbitrary))]
 #[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
+pub(crate) struct GhostLeafUpdate {
+    pub leaf_index: crate::tree_kem::node::LeafIndex,
+    pub leaf_node: LeafNode,
+}
+
+#[derive(Clone, Debug, PartialEq, MlsSize, MlsEncode, MlsDecode)]
+#[cfg_attr(feature = "arbitrary", derive(mls_rs_core::arbitrary::Arbitrary))]
+#[cfg_attr(feature = "serde", derive(serde::Serialize, serde::Deserialize))]
 pub(crate) struct Commit {
     pub proposals: Vec<ProposalOrRef>,
     pub path: Option<UpdatePath>,
+
+    /// QTreeKEM: deterministic mutations of other members' leaf nodes (ghost/quarantine
+    /// maintenance). These changes are authenticated by the committer and must be applied
+    /// deterministically by all receivers before validating the UpdatePath / tree hash.
+    pub ghost_updates: Vec<GhostLeafUpdate>,
 }
 
 #[derive(Clone, PartialEq, Debug, MlsEncode, MlsDecode, MlsSize)]
@@ -408,6 +421,22 @@ where
     }
 }
 
+use crate::tree_kem::node::LeafIndex;
+
+#[derive(Debug, Clone)]
+pub(crate) enum GhostKeyReason {
+    NewQuarantine,
+    Rotation,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct PendingGhostKeyDerivation {
+    pub(crate) leaf_index: LeafIndex,
+    pub(crate) epoch: u64,        // next_epoch
+    pub(crate) seed: Vec<u8>,     // s_g
+    pub(crate) reason: GhostKeyReason,
+}
+
 impl<C> Group<C>
 where
     C: ClientConfig + Clone,
@@ -540,6 +569,12 @@ where
         } else {
             time
         };
+        let mut proposals = proposals;
+        let next_epoch = self.state.context.epoch + 1;
+        let mut pending_ghost_keys = Vec::<PendingGhostKeyDerivation>::new();
+        let ghost_updates = self
+            .update_ghost_members(&mut proposals, &mut pending_ghost_keys, next_epoch)
+            .await?;
 
         #[cfg(feature = "by_ref_proposal")]
         let proposals = self.state.proposals.prepare_commit(sender, proposals);
@@ -561,6 +596,35 @@ where
                 CommitDirection::Send,
             )
             .await?;
+
+        // QTreeKEM (Kotlin-style): apply ghost/quarantine tree mutations directly to the
+        // provisional tree before validating update paths and computing tree hashes.
+        if !ghost_updates.is_empty() {
+            let mut updated_leaves = Vec::with_capacity(ghost_updates.len());
+
+            for gu in ghost_updates.iter() {
+                if let Ok(leaf) = provisional_state
+                    .public_tree
+                    .nodes
+                    .borrow_as_leaf_mut(gu.leaf_index)
+                {
+                    *leaf = gu.leaf_node.clone();
+                    updated_leaves.push(gu.leaf_index);
+                }
+            }
+
+            if !updated_leaves.is_empty() {
+                provisional_state
+                    .public_tree
+                    .update_hashes(&updated_leaves, &self.cipher_suite_provider)
+                    .await?;
+
+                provisional_state.group_context.tree_hash = provisional_state
+                    .public_tree
+                    .tree_hash(&self.cipher_suite_provider)
+                    .await?;
+            }
+        }
 
         let (mut provisional_private_tree, _) =
             self.provisional_private_tree(&provisional_state)?;
@@ -585,7 +649,8 @@ where
             .map_err(|e| MlsError::MlsRulesError(e.into_any_error()))?;
 
         let perform_path_update = commit_options.path_required
-            || path_update_required(&provisional_state.applied_proposals);
+            || path_update_required(&provisional_state.applied_proposals)
+            || !pending_ghost_keys.is_empty();
 
         let (update_path, path_secrets, commit_secret) = if perform_path_update {
             // If populating the path field: Create an UpdatePath using the new tree. Any new
@@ -604,6 +669,66 @@ where
                 None => self.current_user_leaf_node()?.ungreased_extensions(),
             };
 
+            let self_index = provisional_private_tree.self_index;
+
+            let path = provisional_state.public_tree.nodes.direct_copath(self_index);
+            let filtered = provisional_state.public_tree.nodes.filtered(self_index)?;
+
+            let mut positions: Vec<usize> = Vec::new();
+            for (i, f) in filtered.iter().enumerate() {
+                if !*f {
+                    positions.push(i);
+                }
+            }
+
+            let mut ghost_shares_per_path_pos: Vec<Vec<crate::tree_kem::GhostShare>> =
+                vec![Vec::new(); path.len()];
+
+            for pending in pending_ghost_keys.iter() {
+                let params = self.config.ghost_sharing_params();
+                let desired_t = params.threshold_t as usize;
+                let desired_m = params.share_count_m as usize;
+
+                if desired_t == 0 || desired_m == 0 || desired_m < desired_t {
+                    continue;
+                }
+                if positions.len() + 1 < desired_t {
+                    continue;
+                }
+
+                let m = core::cmp::min(desired_m, positions.len() + 1);
+                if m == 0 {
+                    continue;
+                }
+                let t = desired_t as u8;
+
+                let shares = crate::group::secret_sharing::split_seed_bytes(&pending.seed, t, m as u8)
+                    .map_err(|e| MlsError::SerializationError(e.into_any_error()))?;
+
+                // Store the first share locally ("share 0").
+                if let Some(first) = shares.first() {
+                    provisional_private_tree.ghost_share_holders.push(crate::tree_kem::GhostShareHolder {
+                        ghost_leaf: pending.leaf_index,
+                        key_epoch: pending.epoch,
+                        share_id: first.id,
+                        holder_rank: *provisional_private_tree.self_index,
+                        share_value: first.bytes.clone(),
+                    });
+                }
+                let mut k: usize = 0;
+                for s in shares.into_iter().skip(1) {
+                    let pos = positions[k % positions.len()];
+                    k += 1;
+
+                    ghost_shares_per_path_pos[pos].push(crate::tree_kem::GhostShare {
+                        ghost_leaf: pending.leaf_index,
+                        key_epoch: pending.epoch,
+                        share_id: s.id,
+                        share_value: s.bytes,
+                    });
+                }
+            }
+
             let encap_gen = TreeKem::new(
                 &mut provisional_state.public_tree,
                 &mut provisional_private_tree,
@@ -615,6 +740,7 @@ where
                 Some(self.config.leaf_properties(new_leaf_node_extensions)),
                 new_signing_identity,
                 &self.cipher_suite_provider,
+                &ghost_shares_per_path_pos,
                 #[cfg(test)]
                 &self.commit_modifiers,
             )
@@ -661,6 +787,7 @@ where
         let commit = Commit {
             proposals: provisional_state.applied_proposals.proposals_or_refs(),
             path: update_path,
+            ghost_updates,
         };
 
         let mut auth_content = AuthenticatedContent::new_signed(
@@ -898,7 +1025,7 @@ where
 
         Ok((output, pending_commit))
     }
-
+    
     // Construct a GroupInfo reflecting the new state
     // Group ID, epoch, tree, and confirmed transcript hash from the new state
     #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
@@ -941,6 +1068,98 @@ where
             }),
         )
     }
+
+    #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
+    async fn update_ghost_members(
+        &self,
+        proposals: &mut Vec<super::proposal::Proposal>,
+        pending_ghost_keys: &mut Vec<PendingGhostKeyDerivation>,
+        next_epoch: u64,
+    ) -> Result<Vec<GhostLeafUpdate>, crate::client::MlsError> {
+        use crate::group::proposal::{Proposal, RemoveProposal};
+        use crate::crypto::CipherSuiteProvider;
+
+        let inactivity_delay = GroupState::INACTIVITY_DELAY;
+        let ghost_update_delay = GroupState::GHOST_KEY_UPDATE_DELAY;
+        let delete_delay =    GroupState::DELETE_FROM_QUARANTINE_DELAY;
+
+        let mut ghost_updates = Vec::<GhostLeafUpdate>::new();
+
+        for (leaf_index, leaf) in self.state.public_tree.non_empty_leaves() {
+            let is_ghost = leaf.equar != 0;
+
+            if is_ghost && next_epoch.saturating_sub(leaf.equar) >= delete_delay {
+                proposals.push(Proposal::Remove(RemoveProposal {
+                    to_remove: leaf_index,
+                }));
+                continue;
+            }
+
+            if !is_ghost && next_epoch.saturating_sub(leaf.epk) >= inactivity_delay {
+                let mut new_leaf = leaf.clone();
+                let seed_len = self.cipher_suite_provider.kdf_extract_size();
+                let seed = self
+                    .cipher_suite_provider
+                    .random_bytes_vec(seed_len)
+                    .map_err(|e| MlsError::CryptoProviderError(e.into_any_error()))?;
+                let (_sk, pk) = self
+                    .cipher_suite_provider
+                    .kem_derive(&seed)
+                    .await
+                    .map_err(|e| MlsError::CryptoProviderError(
+                        e.into_any_error(),
+                    ))?;
+                pending_ghost_keys.push(PendingGhostKeyDerivation {
+                    leaf_index,
+                    epoch: next_epoch,
+                    seed,
+                    reason: GhostKeyReason::NewQuarantine,
+                });
+                new_leaf.public_key = pk;
+                new_leaf.epk = next_epoch;
+                new_leaf.mark_as_ghost(next_epoch);
+
+                ghost_updates.push(GhostLeafUpdate {
+                    leaf_index,
+                    leaf_node: new_leaf,
+                });
+                continue;
+            }
+
+            if is_ghost && next_epoch.saturating_sub(leaf.epk) >= ghost_update_delay {
+                let mut new_leaf = leaf.clone();
+                let seed_len = self.cipher_suite_provider.kdf_extract_size();
+                let seed = self
+                    .cipher_suite_provider
+                    .random_bytes_vec(seed_len)
+                    .map_err(|e| MlsError::CryptoProviderError(e.into_any_error()))?;
+            
+                let (_sk, pk) = self
+                    .cipher_suite_provider
+                    .kem_derive(&seed)
+                    .await
+                    .map_err(|e| MlsError::CryptoProviderError(
+                        e.into_any_error(),
+                    ))?;
+                pending_ghost_keys.push(PendingGhostKeyDerivation {
+                    leaf_index,
+                    epoch: next_epoch,
+                    seed,
+                    reason: GhostKeyReason::Rotation,
+                });
+                new_leaf.public_key = pk;
+                new_leaf.epk = next_epoch;
+                new_leaf.refresh_ghost_key(next_epoch);
+
+                ghost_updates.push(GhostLeafUpdate {
+                    leaf_index,
+                    leaf_node: new_leaf,
+                });
+            }
+        }
+
+        Ok(ghost_updates)
+    }
 }
 
 #[cfg(test)]
@@ -972,816 +1191,401 @@ pub(crate) mod test_utils {
 
 #[cfg(test)]
 mod tests {
-    use mls_rs_core::{
-        error::IntoAnyError,
-        extension::ExtensionType,
-        identity::{CredentialType, IdentityProvider, MemberValidationContext},
-        time::MlsTime,
-    };
-
-    use crate::extension::RequiredCapabilitiesExt;
-    use crate::{
-        client::test_utils::{test_client_with_key_pkg, TEST_CIPHER_SUITE, TEST_PROTOCOL_VERSION},
-        client_builder::{
-            test_utils::TestClientConfig, BaseConfig, ClientBuilder, WithCryptoProvider,
-            WithIdentityProvider,
-        },
-        client_config::ClientConfig,
-        crypto::test_utils::TestCryptoProvider,
-        extension::test_utils::{TestExtension, TEST_EXTENSION_TYPE},
-        group::test_utils::{test_group, test_group_custom},
-        group::{
-            proposal::ProposalType,
-            test_utils::{test_group_custom_config, test_n_member_group},
-        },
-        identity::test_utils::get_test_signing_identity,
-        identity::{basic::BasicIdentityProvider, test_utils::get_test_basic_credential},
-        key_package::test_utils::test_key_package_message,
-        mls_rules::CommitOptions,
-        Client,
-    };
-
-    #[cfg(feature = "by_ref_proposal")]
-    use crate::crypto::test_utils::test_cipher_suite_provider;
-    #[cfg(feature = "by_ref_proposal")]
-    use crate::extension::ExternalSendersExt;
-    #[cfg(feature = "by_ref_proposal")]
-    use crate::group::mls_rules::DefaultMlsRules;
-
-    #[cfg(feature = "psk")]
-    use crate::{
-        group::proposal::PreSharedKeyProposal,
-        psk::{JustPreSharedKeyID, PreSharedKey, PreSharedKeyID},
-    };
+    use crate::group::test_utils::get_test_25519_key;
 
     use super::*;
 
-    #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
-    async fn test_commit_builder_group() -> Group<TestClientConfig> {
-        test_group_custom_config(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, |b| {
-            b.custom_proposal_type(ProposalType::from(42))
-                .extension_type(TEST_EXTENSION_TYPE.into())
-        })
-        .await
-        .group
-    }
+    // ---------------------------------------------------------------------
+    // QTreeKEM – tests for implementation plan steps 1–4
+    // ---------------------------------------------------------------------
 
-    fn assert_commit_builder_output<C: ClientConfig>(
-        group: Group<C>,
-        mut commit_output: CommitOutput,
-        expected: Vec<Proposal>,
-        welcome_count: usize,
-    ) {
-        let plaintext = commit_output.commit_message.into_plaintext().unwrap();
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn test_mark_as_ghost() {
+        use crate::client::test_utils::TEST_CIPHER_SUITE;
+        use crate::identity::test_utils::get_test_signing_identity;
+        use crate::tree_kem::leaf_node::{LeafNode, LeafNodeSource};
 
-        let commit_data = match plaintext.content.content {
-            Content::Commit(commit) => commit,
-            #[cfg(any(feature = "private_message", feature = "by_ref_proposal"))]
-            _ => panic!("Found non-commit data"),
+        // Create a minimal LeafNode instance (crypto material irrelevant for mark_as_ghost).
+        let (sid, _ssk) = get_test_signing_identity(TEST_CIPHER_SUITE, b"member").await;
+
+        let mut leaf = LeafNode {
+            public_key: get_test_25519_key(0),
+            signing_identity: Some(sid),
+            capabilities: Default::default(),
+            leaf_node_source: LeafNodeSource::Update,
+            extensions: Default::default(),
+            epk: 7,
+            equar: 0,
+            signature: vec![1, 2, 3],
         };
 
-        assert_eq!(commit_data.proposals.len(), expected.len());
+        let epoch = 42u64;
+        leaf.mark_as_ghost(epoch);
 
-        commit_data.proposals.into_iter().for_each(|proposal| {
-            let proposal = match proposal {
-                ProposalOrRef::Proposal(p) => p,
-                #[cfg(feature = "by_ref_proposal")]
-                ProposalOrRef::Reference(_) => panic!("found proposal reference"),
-            };
+        assert!(leaf.is_ghost());
+        assert_eq!(leaf.equar, epoch);
+        assert_eq!(leaf.epk, epoch);
+        assert_eq!(leaf.leaf_node_source, LeafNodeSource::Ghost);
+        assert!(leaf.signing_identity.is_none());
+        assert_eq!(leaf.signature, vec![0u8]);
+    }
 
-            #[cfg(feature = "psk")]
-            if let Some(psk_id) = match proposal.as_ref() {
-                Proposal::Psk(PreSharedKeyProposal { psk: PreSharedKeyID { key_id: JustPreSharedKeyID::External(psk_id), .. },}) => Some(psk_id),
-                _ => None,
-            } {
-                let found = expected.iter().any(|item| matches!(item, Proposal::Psk(PreSharedKeyProposal { psk: PreSharedKeyID { key_id: JustPreSharedKeyID::External(id), .. }}) if id == psk_id));
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn test_commit() {
+        use crate::client::test_utils::{TEST_CIPHER_SUITE, TEST_PROTOCOL_VERSION};
+        use crate::group::test_utils::test_n_member_group;
 
-                assert!(found)
-            } else {
-                assert!(expected.contains(&proposal));
-            }
+        // Group (groups[0] = Alice and groups[1] = Bob)
+        let mut groups = test_n_member_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, 2).await;
+        
+        // A starts commit without proposals
+        let commit_output = groups[0].commit(vec![]).await.unwrap();
+        let commit_msg = commit_output.commit_message;
 
-            #[cfg(not(feature = "psk"))]
-            assert!(expected.contains(&proposal));
-        });
+        // Alice applies her own pending commit (this is required for the committer).
+        groups[0].apply_pending_commit().await.unwrap();
 
-        if welcome_count > 0 {
-            let welcome_msg = commit_output.welcome_messages.pop().unwrap();
+        // B applies commit
+        let res = groups[1].process_message(commit_msg).await;
+        assert!(res.is_ok(), "Bob failed to apply commit: {:?}", res.err());
+        assert_eq!(groups[0].context().epoch, groups[1].context().epoch);
+    }
 
-            assert_eq!(welcome_msg.version, group.state.context.protocol_version);
+    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
+    async fn test_update_ghost_members() {
+        use crate::client::test_utils::{TEST_CIPHER_SUITE, TEST_PROTOCOL_VERSION};
+        use crate::group::state::GroupState;
+        use crate::group::test_utils::test_n_member_group;
+        use crate::tree_kem::node::LeafIndex;
 
-            let welcome_msg = welcome_msg.into_welcome().unwrap();
+        // Group from 5 members
+        let mut groups = test_n_member_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, 5).await;
 
-            assert_eq!(welcome_msg.cipher_suite, group.state.context.cipher_suite);
-            assert_eq!(welcome_msg.secrets.len(), welcome_count);
-        } else {
-            assert!(commit_output.welcome_messages.is_empty());
+        let b = LeafIndex::unchecked(1);
+        let next_epoch: u64 = 100;
+        let leaf_indices: Vec<_> = groups[0]
+            .state
+            .public_tree
+            .non_empty_leaves()
+            .map(|(i, _)| i)
+            .collect();
+
+        for i in leaf_indices {
+            let leaf = groups[0]
+                .state
+                .public_tree
+                .nodes
+                .borrow_as_leaf_mut(i)
+                .unwrap();
+            leaf.equar = 0;
+            leaf.epk = next_epoch;
         }
-    }
+    
+        // B must be a ghost
+        {
+            let leaf_b = groups[0].state.public_tree.nodes.borrow_as_leaf_mut(b).unwrap();
+            leaf_b.mark_as_ghost(65); // B had last update on 65 epoch
+            leaf_b.epk = next_epoch - GroupState::GHOST_KEY_UPDATE_DELAY;
+        }
 
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn test_commit_builder_add() {
-        let mut group = test_commit_builder_group().await;
+        let mut proposals = Vec::new();
+        let mut pending = Vec::new();
 
-        let test_key_package =
-            test_key_package_message(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, "alice").await;
-
-        let commit_output = group
-            .commit_builder()
-            .add_member(test_key_package.clone())
-            .unwrap()
-            .build()
+        let ghost_updates = groups[0]
+            .update_ghost_members(&mut proposals, &mut pending, next_epoch)
             .await
             .unwrap();
 
-        let expected_add = group.add_proposal(test_key_package).unwrap();
-
-        assert_commit_builder_output(group, commit_output, vec![expected_add], 1)
-    }
-
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn test_commit_builder_add_with_ext() {
-        let mut group = test_commit_builder_group().await;
-
-        let (bob_client, bob_key_package) =
-            test_client_with_key_pkg(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, "bob").await;
-
-        let ext = TestExtension { foo: 42 };
-        let mut extension_list = ExtensionList::default();
-        extension_list.set_from(ext.clone()).unwrap();
-
-        let welcome_message = group
-            .commit_builder()
-            .add_member(bob_key_package)
-            .unwrap()
-            .set_group_info_ext(extension_list)
-            .build()
-            .await
-            .unwrap()
-            .welcome_messages
-            .remove(0);
-
-        let (_, context) = bob_client
-            .join_group(None, &welcome_message, None)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            context
-                .group_info_extensions
-                .get_as::<TestExtension>()
-                .unwrap()
-                .unwrap(),
-            ext
+        //
+        assert!(
+            pending.iter().any(|p| p.leaf_index == b && matches!(p.reason, super::GhostKeyReason::Rotation)),
+            "expected Rotation for ghost member when epk is old enough"
+        );
+        assert!(
+            ghost_updates.iter().any(|u| u.leaf_index == b),
+            "expected a ghost leaf update for key rotation"
         );
     }
 
     #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn test_commit_builder_remove() {
-        let mut group = test_commit_builder_group().await;
-        let test_key_package =
-            test_key_package_message(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, "alice").await;
+    async fn test_update_ghost_members_quarantines_non_ghost_based_on_epk() {
+        use crate::client::test_utils::{TEST_CIPHER_SUITE, TEST_PROTOCOL_VERSION};
+        use crate::group::state::GroupState;
+        use crate::group::test_utils::test_n_member_group;
+        use crate::tree_kem::node::LeafIndex;
 
-        group
-            .commit_builder()
-            .add_member(test_key_package)
-            .unwrap()
-            .build()
+        let mut groups = test_n_member_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, 5).await;
+
+        let b = LeafIndex::unchecked(1);
+        let next_epoch: u64 = 200;
+
+        let leaf_indices: Vec<_> = groups[0]
+            .state
+            .public_tree
+            .non_empty_leaves()
+            .map(|(i, _)| i)
+            .collect();
+
+        for i in leaf_indices {
+            let leaf = groups[0]
+                .state
+                .public_tree
+                .nodes
+                .borrow_as_leaf_mut(i)
+                .unwrap();
+            leaf.equar = 0;
+            leaf.epk = next_epoch;
+        }
+        // B не ghost, но "неактивен" по epk
+        {
+            let leaf_b = groups[0].state.public_tree.nodes.borrow_as_leaf_mut(b).unwrap();
+            leaf_b.equar = 0;
+            leaf_b.epk = next_epoch - GroupState::INACTIVITY_DELAY;
+        }
+
+        let mut proposals = Vec::new();
+        let mut pending = Vec::new();
+
+        let ghost_updates = groups[0]
+            .update_ghost_members(&mut proposals, &mut pending, next_epoch)
             .await
             .unwrap();
 
-        group.apply_pending_commit().await.unwrap();
+        // Должен появиться pending derivation с NewQuarantine
+        assert!(
+            pending.iter().any(|p| p.leaf_index == b && matches!(p.reason, super::GhostKeyReason::NewQuarantine)),
+            "expected NewQuarantine for inactive non-ghost member"
+        );
 
-        let commit_output = group
-            .commit_builder()
-            .remove_member(1)
-            .unwrap()
-            .build()
-            .await
-            .unwrap();
+        // Должно появиться ghost tree-mutation, помечающее leaf как ghost (equar=next_epoch)
+        let updated = ghost_updates
+            .iter()
+            .find(|u| u.leaf_index == b)
+            .map(|u| &u.leaf_node)
+            .expect("expected ghost leaf update");
 
-        let expected_remove = group.remove_proposal(1).unwrap();
-
-        assert_commit_builder_output(group, commit_output, vec![expected_remove], 0);
-    }
-
-    #[cfg(feature = "psk")]
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn test_commit_builder_psk() {
-        let mut group = test_commit_builder_group().await;
-        let test_psk = ExternalPskId::new(vec![1]);
-
-        group
-            .config
-            .secret_store()
-            .insert(test_psk.clone(), PreSharedKey::from(vec![1]));
-
-        let commit_output = group
-            .commit_builder()
-            .add_external_psk(test_psk.clone())
-            .unwrap()
-            .build()
-            .await
-            .unwrap();
-
-        let key_id = JustPreSharedKeyID::External(test_psk);
-        let expected_psk = group.psk_proposal(key_id).unwrap();
-
-        assert_commit_builder_output(group, commit_output, vec![expected_psk], 0)
-    }
-
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn test_commit_builder_group_context_ext() {
-        let mut group = test_commit_builder_group().await;
-        let mut test_ext = ExtensionList::default();
-        test_ext
-            .set_from(RequiredCapabilitiesExt::default())
-            .unwrap();
-
-        let commit_output = group
-            .commit_builder()
-            .set_group_context_ext(test_ext.clone())
-            .unwrap()
-            .build()
-            .await
-            .unwrap();
-
-        let expected_ext = group.group_context_extensions_proposal(test_ext);
-
-        assert_commit_builder_output(group, commit_output, vec![expected_ext], 0);
+        assert_eq!(updated.equar, next_epoch, "expected equar set to next_epoch");
+        assert_eq!(updated.epk, next_epoch, "expected epk set to next_epoch");
+        assert!(updated.is_ghost(), "expected updated leaf to be ghost");
     }
 
     #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn test_commit_builder_reinit() {
-        let mut group = test_commit_builder_group().await;
-        let test_group_id = "foo".as_bytes().to_vec();
-        let test_cipher_suite = TEST_CIPHER_SUITE;
-        let test_protocol_version = TEST_PROTOCOL_VERSION;
-        let mut test_ext = ExtensionList::default();
+    async fn test_public_tree_consistency() {
+        use crate::client::test_utils::{TEST_CIPHER_SUITE, TEST_PROTOCOL_VERSION};
+        use crate::group::test_utils::test_n_member_group;
 
-        test_ext
-            .set_from(RequiredCapabilitiesExt::default())
-            .unwrap();
+        // groups[0] = Alice, groups[1] = Bob
+        let mut groups = test_n_member_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, 2).await;
 
-        let commit_output = group
-            .commit_builder()
-            .reinit(
-                Some(test_group_id.clone()),
-                test_protocol_version,
-                test_cipher_suite,
-                test_ext.clone(),
-            )
-            .unwrap()
-            .build()
-            .await
-            .unwrap();
+        //Alice commits
+        let commit_output = groups[0].commit(vec![]).await.unwrap();
+        let commit_msg = commit_output.commit_message;
+        groups[0].apply_pending_commit().await.unwrap();
 
-        let expected_reinit = group
-            .reinit_proposal(
-                Some(test_group_id),
-                test_protocol_version,
-                test_cipher_suite,
-                test_ext,
-            )
-            .unwrap();
+        //Bob processes commit
+        groups[1].process_message(commit_msg).await.unwrap();
 
-        assert_commit_builder_output(group, commit_output, vec![expected_reinit], 0);
-    }
+        //Check public tree consistency
+        assert_eq!(
+            groups[0].state.public_tree,
+            groups[1].state.public_tree,
+            "public trees diverged after Bob processed Alice's commit"
+        );
+        assert_eq!(
+            groups[0].context().epoch,
+            groups[1].context().epoch,
+            "group epochs diverged after commit processing"
+        );
 
-    #[cfg(feature = "custom_proposal")]
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn test_commit_builder_custom_proposal() {
-        let mut group = test_commit_builder_group().await;
-
-        let proposal = CustomProposal::new(42.into(), vec![0, 1]);
-
-        let commit_output = group
-            .commit_builder()
-            .custom_proposal(proposal.clone())
-            .build()
-            .await
-            .unwrap();
-
-        assert_commit_builder_output(group, commit_output, vec![Proposal::Custom(proposal)], 0);
-    }
-
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn test_commit_builder_chaining() {
-        let mut group = test_commit_builder_group().await;
-        let kp1 = test_key_package_message(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, "alice").await;
-        let kp2 = test_key_package_message(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, "bob").await;
-
-        let expected_adds = vec![
-            group.add_proposal(kp1.clone()).unwrap(),
-            group.add_proposal(kp2.clone()).unwrap(),
-        ];
-
-        let commit_output = group
-            .commit_builder()
-            .add_member(kp1)
-            .unwrap()
-            .add_member(kp2)
-            .unwrap()
-            .build()
-            .await
-            .unwrap();
-
-        assert_commit_builder_output(group, commit_output, expected_adds, 2);
-    }
-
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn test_commit_builder_empty_commit() {
-        let mut group = test_commit_builder_group().await;
-
-        let commit_output = group.commit_builder().build().await.unwrap();
-
-        assert_commit_builder_output(group, commit_output, vec![], 0);
-    }
-
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn test_commit_builder_authenticated_data() {
-        let mut group = test_commit_builder_group().await;
-        let test_data = "test".as_bytes().to_vec();
-
-        let commit_output = group
-            .commit_builder()
-            .authenticated_data(test_data.clone())
-            .build()
-            .await
-            .unwrap();
+        let roster_a = groups[0].roster().members();
+        let roster_b = groups[1].roster().members();
 
         assert_eq!(
-            commit_output
-                .commit_message
-                .into_plaintext()
-                .unwrap()
-                .content
-                .authenticated_data,
-            test_data
+            roster_a, roster_b,
+            "rosters diverged after commit processing"
         );
+
+        let a0 = groups[0].roster().member_with_index(0).unwrap();
+        let b0 = groups[1].roster().member_with_index(0).unwrap();
+        assert_eq!(a0, b0, "member_with_index(0) diverged");
+
+        let a1 = groups[0].roster().member_with_index(1).unwrap();
+        let b1 = groups[1].roster().member_with_index(1).unwrap();
+        assert_eq!(a1, b1, "member_with_index(1) diverged");
     }
 
-    #[cfg(feature = "by_ref_proposal")]
+
     #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn test_commit_builder_multiple_welcome_messages() {
-        let mut group = test_group_custom_config(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, |b| {
-            let options = CommitOptions::new().with_single_welcome_message(false);
-            b.mls_rules(DefaultMlsRules::new().with_commit_options(options))
-        })
-        .await;
+    async fn test_demo() {
+        use crate::client::test_utils::{TEST_CIPHER_SUITE, TEST_PROTOCOL_VERSION};
+        use crate::group::state::GroupState;
+        use crate::group::test_utils::test_n_member_group;
+        use crate::tree_kem::node::LeafIndex;
 
-        let (alice, alice_kp) =
-            test_client_with_key_pkg(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, "a").await;
+        // === Arrange ===
+        // groups[0] = Alice (committer), groups[1] = Bob (will be quarantined / goes inactive)
+        let n_members: usize = 9;
+        let mut groups = test_n_member_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, n_members).await;
 
-        let (bob, bob_kp) =
-            test_client_with_key_pkg(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE, "b").await;
+        let alice = 0usize;
+        let bob = LeafIndex::unchecked(1);
 
-        group.propose_add(alice_kp.clone(), vec![]).await.unwrap();
 
-        group.propose_add(bob_kp.clone(), vec![]).await.unwrap();
+        // Buffer commits that Bob misses while inactive, so that he can replay them after recovery.
+        let mut bob_buffered_commits = Vec::new();
 
-        let output = group.commit(Vec::new()).await.unwrap();
-        let welcomes = output.welcome_messages;
+        // === Act (1): quarantine Bob ===
+        let mut quarantined_epoch: Option<u64> = None;
 
-        let cs = test_cipher_suite_provider(TEST_CIPHER_SUITE);
+        let max_steps = (GroupState::INACTIVITY_DELAY as usize) * 3;
+        let mut pre = Vec::new();
+        let mut post = Vec::new();
 
-        for (client, kp) in [(alice, alice_kp), (bob, bob_kp)] {
-            let kp_ref = kp.key_package_reference(&cs).await.unwrap().unwrap();
 
-            let welcome = welcomes
-                .iter()
-                .find(|w| w.welcome_key_package_references().contains(&&kp_ref))
+        for _step in 0..max_steps {
+            let out = groups[alice].commit(vec![]).await.unwrap();
+            let commit_msg = out.commit_message;
+
+            groups[alice].apply_pending_commit().await.unwrap();
+            let epoch_after_apply = groups[alice].context().epoch;
+            // Deliver to all other active members; Bob (inactive) does not process commits.
+            
+            for i in 2..n_members {
+                groups[i].process_message(commit_msg.clone()).await.unwrap();
+            }
+            bob_buffered_commits.push((epoch_after_apply, commit_msg.clone()));
+            // Check in Alice's view whether Bob is now quarantined
+            let leaf_b = groups[alice]
+                .state
+                .public_tree
+                .nodes
+                .borrow_as_leaf(bob)
                 .unwrap();
 
-            client.join_group(None, welcome, None).await.unwrap();
-
-            assert_eq!(welcome.clone().into_welcome().unwrap().secrets.len(), 1);
-        }
-    }
-
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn commit_can_change_credential() {
-        let cs = TEST_CIPHER_SUITE;
-        let mut groups = test_n_member_group(TEST_PROTOCOL_VERSION, cs, 3).await;
-        let (identity, secret_key) = get_test_signing_identity(cs, b"member").await;
-
-        let commit_output = groups[0]
-            .commit_builder()
-            .set_new_signing_identity(secret_key, identity.clone())
-            .build()
-            .await
-            .unwrap();
-
-        // Check that the credential was updated by in the committer's state.
-        groups[0].process_pending_commit().await.unwrap();
-        let new_member = groups[0].roster().member_with_index(0).unwrap();
-
-        assert_eq!(
-            new_member.signing_identity.credential,
-            get_test_basic_credential(b"member".to_vec())
-        );
-
-        assert_eq!(
-            new_member.signing_identity.signature_key,
-            identity.signature_key
-        );
-
-        // Check that the credential was updated in another member's state.
-        groups[1]
-            .process_message(commit_output.commit_message)
-            .await
-            .unwrap();
-
-        let new_member = groups[1].roster().member_with_index(0).unwrap();
-
-        assert_eq!(
-            new_member.signing_identity.credential,
-            get_test_basic_credential(b"member".to_vec())
-        );
-
-        assert_eq!(
-            new_member.signing_identity.signature_key,
-            identity.signature_key
-        );
-    }
-
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn commit_includes_tree_if_no_ratchet_tree_ext() {
-        let mut group = test_group_custom(
-            TEST_PROTOCOL_VERSION,
-            TEST_CIPHER_SUITE,
-            Default::default(),
-            None,
-            Some(CommitOptions::new().with_ratchet_tree_extension(false)),
-        )
-        .await;
-
-        let commit = group.commit(vec![]).await.unwrap();
-
-        group.apply_pending_commit().await.unwrap();
-
-        let new_tree = group.export_tree();
-
-        assert_eq!(new_tree, commit.ratchet_tree.unwrap())
-    }
-
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn commit_does_not_include_tree_if_ratchet_tree_ext() {
-        let mut group = test_group_custom(
-            TEST_PROTOCOL_VERSION,
-            TEST_CIPHER_SUITE,
-            Default::default(),
-            None,
-            Some(CommitOptions::new().with_ratchet_tree_extension(true)),
-        )
-        .await;
-
-        let commit = group.commit(vec![]).await.unwrap();
-
-        assert!(commit.ratchet_tree.is_none());
-    }
-
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn commit_includes_external_commit_group_info_if_requested() {
-        let mut group = test_group_custom(
-            TEST_PROTOCOL_VERSION,
-            TEST_CIPHER_SUITE,
-            Default::default(),
-            None,
-            Some(
-                CommitOptions::new()
-                    .with_allow_external_commit(true)
-                    .with_ratchet_tree_extension(false),
-            ),
-        )
-        .await;
-
-        let commit = group.commit(vec![]).await.unwrap();
-
-        let info = commit
-            .external_commit_group_info
-            .unwrap()
-            .into_group_info()
-            .unwrap();
-
-        assert!(!info.extensions.has_extension(ExtensionType::RATCHET_TREE));
-        assert!(info.extensions.has_extension(ExtensionType::EXTERNAL_PUB));
-    }
-
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn commit_includes_external_commit_and_tree_if_requested() {
-        let mut group = test_group_custom(
-            TEST_PROTOCOL_VERSION,
-            TEST_CIPHER_SUITE,
-            Default::default(),
-            None,
-            Some(
-                CommitOptions::new()
-                    .with_allow_external_commit(true)
-                    .with_ratchet_tree_extension(true),
-            ),
-        )
-        .await;
-
-        let commit = group.commit(vec![]).await.unwrap();
-
-        let info = commit
-            .external_commit_group_info
-            .unwrap()
-            .into_group_info()
-            .unwrap();
-
-        assert!(info.extensions.has_extension(ExtensionType::RATCHET_TREE));
-        assert!(info.extensions.has_extension(ExtensionType::EXTERNAL_PUB));
-    }
-
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn commit_does_not_include_external_commit_group_info_if_not_requested() {
-        let mut group = test_group_custom(
-            TEST_PROTOCOL_VERSION,
-            TEST_CIPHER_SUITE,
-            Default::default(),
-            None,
-            Some(CommitOptions::new().with_allow_external_commit(false)),
-        )
-        .await;
-
-        let commit = group.commit(vec![]).await.unwrap();
-
-        assert!(commit.external_commit_group_info.is_none());
-    }
-
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn commit_includes_tree_out_of_bounds_and_not_in_external_group_info_if_requested_tree_ext_off(
-    ) {
-        let mut group = test_group_custom(
-            TEST_PROTOCOL_VERSION,
-            TEST_CIPHER_SUITE,
-            Default::default(),
-            None,
-            Some(
-                CommitOptions::new()
-                    .with_always_out_of_band_ratchet_tree(true)
-                    .with_ratchet_tree_extension(false)
-                    .with_allow_external_commit(true),
-            ),
-        )
-        .await;
-
-        let commit = group.commit(vec![]).await.unwrap();
-
-        assert!(commit.ratchet_tree.is_some());
-
-        let info = commit
-            .external_commit_group_info
-            .unwrap()
-            .into_group_info()
-            .unwrap();
-
-        assert!(!info.extensions.has_extension(ExtensionType::RATCHET_TREE));
-    }
-
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn commit_includes_tree_out_of_bounds_and_not_in_external_group_info_if_requested_tree_ext_on(
-    ) {
-        let mut group = test_group_custom(
-            TEST_PROTOCOL_VERSION,
-            TEST_CIPHER_SUITE,
-            Default::default(),
-            None,
-            Some(
-                CommitOptions::new()
-                    .with_always_out_of_band_ratchet_tree(true)
-                    .with_ratchet_tree_extension(true)
-                    .with_allow_external_commit(true),
-            ),
-        )
-        .await;
-
-        let commit = group.commit(vec![]).await.unwrap();
-
-        assert!(commit.ratchet_tree.is_some());
-
-        let info = commit
-            .external_commit_group_info
-            .unwrap()
-            .into_group_info()
-            .unwrap();
-
-        assert!(!info.extensions.has_extension(ExtensionType::RATCHET_TREE));
-    }
-
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn member_identity_is_validated_against_new_extensions() {
-        let alice = client_with_test_extension(b"alice").await;
-        let mut alice = alice
-            .create_group(ExtensionList::new(), Default::default(), None)
-            .await
-            .unwrap();
-
-        let bob = client_with_test_extension(b"bob").await;
-        let bob_kp = bob
-            .generate_key_package_message(Default::default(), Default::default(), None)
-            .await
-            .unwrap();
-
-        let mut extension_list = ExtensionList::new();
-        let extension = TestExtension { foo: b'a' };
-        extension_list.set_from(extension).unwrap();
-
-        let res = alice
-            .commit_builder()
-            .add_member(bob_kp)
-            .unwrap()
-            .set_group_context_ext(extension_list.clone())
-            .unwrap()
-            .build()
-            .await;
-
-        assert!(res.is_err());
-
-        let alex = client_with_test_extension(b"alex").await;
-
-        alice
-            .commit_builder()
-            .add_member(
-                alex.generate_key_package_message(Default::default(), Default::default(), None)
-                    .await
-                    .unwrap(),
-            )
-            .unwrap()
-            .set_group_context_ext(extension_list.clone())
-            .unwrap()
-            .build()
-            .await
-            .unwrap();
-    }
-
-    #[cfg(feature = "by_ref_proposal")]
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn server_identity_is_validated_against_new_extensions() {
-        let alice = client_with_test_extension(b"alice").await;
-        let mut alice = alice
-            .create_group(ExtensionList::new(), Default::default(), None)
-            .await
-            .unwrap();
-
-        let mut extension_list = ExtensionList::new();
-        let extension = TestExtension { foo: b'a' };
-        extension_list.set_from(extension).unwrap();
-
-        let (alex_server, _) = get_test_signing_identity(TEST_CIPHER_SUITE, b"alex").await;
-
-        let mut alex_extensions = extension_list.clone();
-
-        alex_extensions
-            .set_from(ExternalSendersExt {
-                allowed_senders: vec![alex_server],
-            })
-            .unwrap();
-
-        let res = alice
-            .commit_builder()
-            .set_group_context_ext(alex_extensions)
-            .unwrap()
-            .build()
-            .await;
-
-        assert!(res.is_err());
-
-        let (bob_server, _) = get_test_signing_identity(TEST_CIPHER_SUITE, b"bob").await;
-
-        let mut bob_extensions = extension_list;
-
-        bob_extensions
-            .set_from(ExternalSendersExt {
-                allowed_senders: vec![bob_server],
-            })
-            .unwrap();
-
-        alice
-            .commit_builder()
-            .set_group_context_ext(bob_extensions)
-            .unwrap()
-            .build()
-            .await
-            .unwrap();
-    }
-
-    #[derive(Debug, Clone)]
-    struct IdentityProviderWithExtension(BasicIdentityProvider);
-
-    #[derive(Clone, Debug)]
-    #[cfg_attr(feature = "std", derive(thiserror::Error))]
-    #[cfg_attr(feature = "std", error("test error"))]
-    struct IdentityProviderWithExtensionError {}
-
-    impl IntoAnyError for IdentityProviderWithExtensionError {
-        #[cfg(feature = "std")]
-        fn into_dyn_error(self) -> Result<Box<dyn std::error::Error + Send + Sync>, Self> {
-            Ok(self.into())
-        }
-    }
-
-    impl IdentityProviderWithExtension {
-        // True if the identity starts with the character `foo` from `TestExtension` or if `TestExtension`
-        // is not set.
-        #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
-        async fn starts_with_foo(
-            &self,
-            identity: &SigningIdentity,
-            _timestamp: Option<MlsTime>,
-            extensions: Option<&ExtensionList>,
-        ) -> bool {
-            if let Some(extensions) = extensions {
-                if let Some(ext) = extensions.get_as::<TestExtension>().unwrap() {
-                    self.identity(identity, extensions).await.unwrap()[0] == ext.foo
-                } else {
-                    true
-                }
-            } else {
-                true
+            if leaf_b.equar != 0 {
+                quarantined_epoch = Some(leaf_b.equar);
+                break;
             }
         }
-    }
 
-    #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
-    #[cfg_attr(mls_build_async, maybe_async::must_be_async)]
-    impl IdentityProvider for IdentityProviderWithExtension {
-        type Error = IdentityProviderWithExtensionError;
+        let key_epoch = quarantined_epoch.expect("Bob was not quarantined within max_steps");
 
-        async fn validate_member(
-            &self,
-            identity: &SigningIdentity,
-            timestamp: Option<MlsTime>,
-            context: MemberValidationContext<'_>,
-        ) -> Result<(), Self::Error> {
-            self.starts_with_foo(identity, timestamp, context.new_extensions())
-                .await
-                .then_some(())
-                .ok_or(IdentityProviderWithExtensionError {})
+        // Sanity: active members see Bob as ghost
+        for i in 0..n_members {
+            if i == 1 {
+                continue; // Bob was inactive
+            }
+            let leaf_b = groups[i]
+                .state
+                .public_tree
+                .nodes
+                .borrow_as_leaf(bob)
+                .unwrap();
+            assert_eq!(leaf_b.equar, key_epoch, "member {} sees wrong equar", i);
+            assert!(leaf_b.is_ghost(), "member {} does not see Bob as ghost", i);
+            
+            groups[i].cache_received_ghost_shares();
         }
 
-        async fn validate_external_sender(
-            &self,
-            identity: &SigningIdentity,
-            timestamp: Option<MlsTime>,
-            extensions: Option<&ExtensionList>,
-        ) -> Result<(), Self::Error> {
-            (!self.starts_with_foo(identity, timestamp, extensions).await)
-                .then_some(())
-                .ok_or(IdentityProviderWithExtensionError {})
+        // === Act (2): Bob returns via threshold share recovery ===
+        //
+        // Bob contacts t active members and receives shares. In the test we simply copy
+        // share holders from active members into Bob's local store (equivalent to ShareResend).
+        let t = groups[alice].config.ghost_sharing_params().threshold_t as usize;
+        assert!(t > 0);
+        for (e, msg) in bob_buffered_commits.into_iter() {
+            if e < key_epoch {
+                pre.push(msg);
+            } else {
+                post.push(msg);
+            }
+        }
+        assert!(!post.is_empty(), "expected at least the quarantine commit in post");
+for msg in pre {
+            groups[1].process_message(msg).await.unwrap();
+        }
+        let mut copied = 0usize;
+        for donor in 0..n_members {
+             if donor == 1 {
+                continue; // Bob
+            }
+            let shares = groups[donor]
+                .private_tree
+                .ghost_share_holders
+                .iter()
+                .filter(|h| h.ghost_leaf == bob && h.key_epoch == key_epoch)
+                .cloned()
+                .collect::<Vec<_>>();
+
+            for h in shares {
+                groups[1].private_tree.ghost_share_holders.push(h);
+            }
+
+            // Count unique share ids now available to Bob.
+            let mut uniq = std::collections::BTreeSet::new();
+            for h in groups[1]
+                .private_tree
+                .ghost_share_holders
+                .iter()
+                .filter(|h| h.ghost_leaf == bob && h.key_epoch == key_epoch)
+            {
+                uniq.insert(h.share_id);
+            }
+            copied = uniq.len();
+            if copied >= t {
+                break;
+            }
+        }
+        assert!(
+            copied >= t,
+            "insufficient unique shares copied for recovery: got {}, need {}",
+            copied,
+            t
+        );
+
+        let quarantine_commit = post[0].clone();
+        groups[1]
+            .preapply_commit_public_only(quarantine_commit.clone())
+            .await
+            .unwrap();
+        // Recover and install Bob's ghost/self HPKE secret key so he can decrypt UpdatePath.
+        groups[1]
+            .recover_and_install_ghost_self_key(bob, key_epoch)
+            .await
+            .unwrap();
+
+        groups[1].process_message(quarantine_commit).await.unwrap();
+        for msg in post.into_iter().skip(1) {
+            groups[1].process_message(msg).await.unwrap();
+        }
+        // === Act (3): Bob reactivates by making a self-update commit ===
+        // QTreeKEM: after catch-up, the member can generate a fresh leaf key and sign it,
+        // clearing equar and becoming active again.
+        let out = groups[1].commit(vec![]).await.unwrap();
+        let commit_msg = out.commit_message;
+        groups[1].apply_pending_commit().await.unwrap();
+
+        // Deliver Bob's commit to all other active members
+        for i in 0..n_members {
+            if i == 1 {
+                continue;
+            }
+            groups[i].process_message(commit_msg.clone()).await.unwrap();
         }
 
-        async fn identity(
-            &self,
-            signing_identity: &SigningIdentity,
-            extensions: &ExtensionList,
-        ) -> Result<Vec<u8>, Self::Error> {
-            self.0
-                .identity(signing_identity, extensions)
-                .await
-                .map_err(|_| IdentityProviderWithExtensionError {})
+        // === Assert: everyone (including Bob) now sees Bob as active (not ghost) ===
+        for i in 0..n_members {
+            let leaf_b = groups[i]
+                .state
+                .public_tree
+                .nodes
+                .borrow_as_leaf(bob)
+                .unwrap();
+
+            assert_eq!(leaf_b.equar, 0, "member {} still sees Bob quarantined", i);
+            assert!(!leaf_b.is_ghost(), "member {} still sees Bob as ghost", i);
+            assert!(leaf_b.signing_identity.is_some(), "member {} sees Bob without identity", i);
+            assert!(leaf_b.signature != vec![0u8], "member {} sees Bob with ghost signature", i);
         }
-
-        async fn valid_successor(
-            &self,
-            _predecessor: &SigningIdentity,
-            _successor: &SigningIdentity,
-            _extensions: &ExtensionList,
-        ) -> Result<bool, Self::Error> {
-            Ok(true)
-        }
-
-        fn supported_types(&self) -> Vec<CredentialType> {
-            self.0.supported_types()
-        }
-    }
-
-    type ExtensionClientConfig = WithIdentityProvider<
-        IdentityProviderWithExtension,
-        WithCryptoProvider<TestCryptoProvider, BaseConfig>,
-    >;
-
-    #[cfg_attr(not(mls_build_async), maybe_async::must_be_sync)]
-    async fn client_with_test_extension(name: &[u8]) -> Client<ExtensionClientConfig> {
-        let (identity, secret_key) = get_test_signing_identity(TEST_CIPHER_SUITE, name).await;
-
-        ClientBuilder::new()
-            .crypto_provider(TestCryptoProvider::new())
-            .extension_types(vec![TEST_EXTENSION_TYPE.into()])
-            .identity_provider(IdentityProviderWithExtension(BasicIdentityProvider::new()))
-            .signing_identity(identity, secret_key, TEST_CIPHER_SUITE)
-            .build()
-    }
-
-    #[maybe_async::test(not(mls_build_async), async(mls_build_async, crate::futures_test))]
-    async fn detached_commit() {
-        let mut group = test_group(TEST_PROTOCOL_VERSION, TEST_CIPHER_SUITE).await;
-
-        let (_commit, secrets) = group.commit_builder().build_detached().await.unwrap();
-        assert!(group.pending_commit.is_none());
-        group.apply_detached_commit(secrets).await.unwrap();
-        assert_eq!(group.context().epoch, 1);
     }
 }

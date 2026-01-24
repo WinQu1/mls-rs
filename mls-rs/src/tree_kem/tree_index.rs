@@ -370,7 +370,12 @@ mod tests {
         assert_eq!(test_index.hpke_key.len(), test_data.len());
 
         test_data.into_iter().enumerate().for_each(|(i, d)| {
-            let pub_key = d.leaf_node.signing_identity.signature_key;
+            let pub_key = d.leaf_node
+                .signing_identity
+                .as_ref()
+                .expect("test leaf must have signing identity")
+                .signature_key
+                .clone();
 
             assert_eq!(
                 test_index.credential_signature_key.get(&pub_key),
@@ -445,7 +450,14 @@ mod tests {
         assert_eq!(
             test_index
                 .credential_signature_key
-                .get(&test_data[1].leaf_node.signing_identity.signature_key),
+                .get(
+                    &test_data[1]
+                        .leaf_node
+                        .signing_identity
+                        .as_ref()
+                        .expect("test leaf must have signing identity")
+                        .signature_key,
+                ),
             None
         );
 

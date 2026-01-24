@@ -713,6 +713,7 @@ pub(crate) mod test_utils {
         let commit = Commit {
             proposals: Default::default(),
             path: None,
+            ghost_updates: Vec::new(),
         };
 
         AuthenticatedContent {

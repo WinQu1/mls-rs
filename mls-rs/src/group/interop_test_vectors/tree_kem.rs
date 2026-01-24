@@ -152,6 +152,7 @@ async fn tree_kem() {
                 let commit = Commit {
                     proposals: vec![],
                     path: Some(path),
+                    ghost_updates: Vec::new(),
                 };
 
                 let mut auth_content = AuthenticatedContent::new(

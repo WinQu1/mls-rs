@@ -188,27 +188,28 @@ impl<'a, C: IdentityProvider, CP: CipherSuiteProvider> LeafNodeValidator<'a, C, 
     ) -> Result<(), MlsError> {
         // Check that we are validating within the proper context
         self.check_context(leaf_node, &context)?;
-
         // Verify the credential
-        if matches!(leaf_node.leaf_node_source, LeafNodeSource::Ghost) {
-        // Ghost: must have no identity and signature must be exactly [0]
-        if leaf_node.signing_identity.is_some() {
-            return Err(MlsError::InvalidLeafNodeSource);
-        }
+        if leaf_node.signing_identity.is_none() {
+            if !matches!(
+                leaf_node.leaf_node_source,
+                LeafNodeSource::Ghost | LeafNodeSource::Commit(_)
+            ) {
+                return Err(MlsError::InvalidLeafNodeSource);
+            }
 
-        if leaf_node.signature.as_slice() != [0u8] {
-            return Err(MlsError::InvalidSignature);
-        }
+            if leaf_node.signature.as_slice() != [0u8] {
+                return Err(MlsError::InvalidSignature);
+            }
         } else {
             // Non-ghost: must have identity
-            let signing_identity = leaf_node
+            let si = leaf_node
                 .signing_identity
                 .as_ref()
                 .ok_or(MlsError::InvalidLeafNodeSource)?;
 
             // Verify the credential
             self.identity_provider
-                .validate_member(signing_identity, context.generation_time(), self.context)
+                .validate_member(si, context.generation_time(), self.context)
                 .await
                 .map_err(|e| MlsError::IdentityProviderError(e.into_any_error()))?;
 
@@ -216,45 +217,44 @@ impl<'a, C: IdentityProvider, CP: CipherSuiteProvider> LeafNodeValidator<'a, C, 
             leaf_node
                 .verify(
                     self.cipher_suite_provider,
-                    &signing_identity.signature_key,
+                    &si.signature_key,
                     &context.signing_context(),
                 )
                 .await?;
         }
+            // If required capabilities are specified, verify the leaf node meets the requirements
+            self.validate_required_capabilities(leaf_node)?;
 
-        // If required capabilities are specified, verify the leaf node meets the requirements
-        self.validate_required_capabilities(leaf_node)?;
-
-        // If there are extensions, make sure they are referenced in the capabilities field
-        for one_ext in &*leaf_node.extensions {
-            if !leaf_node
-                .capabilities
-                .extensions
-                .contains(&one_ext.extension_type)
-            {
-                return Err(MlsError::ExtensionNotInCapabilities(one_ext.extension_type));
+            // If there are extensions, make sure they are referenced in the capabilities field
+            for one_ext in &*leaf_node.extensions {
+                if !leaf_node
+                    .capabilities
+                    .extensions
+                    .contains(&one_ext.extension_type)
+                {
+                    return Err(MlsError::ExtensionNotInCapabilities(one_ext.extension_type));
+                }
             }
+
+            // Verify that group extensions are supported by the leaf
+            if let Some(extensions) = self.context.new_extensions() {
+                extensions
+                    .iter()
+                    .map(|ext| ext.extension_type)
+                    .find(|ext_type| {
+                        !ext_type.is_default() && !leaf_node.capabilities.extensions.contains(ext_type)
+                    })
+                    .map(MlsError::UnsupportedGroupExtension)
+                    .map_or(Ok(()), Err)?;
+            }
+
+            leaf_node.validate_no_default_values_listed()?;
+
+            #[cfg(feature = "by_ref_proposal")]
+            self.validate_external_senders_ext_credentials(leaf_node)?;
+
+            Ok(())
         }
-
-        // Verify that group extensions are supported by the leaf
-        if let Some(extensions) = self.context.new_extensions() {
-            extensions
-                .iter()
-                .map(|ext| ext.extension_type)
-                .find(|ext_type| {
-                    !ext_type.is_default() && !leaf_node.capabilities.extensions.contains(ext_type)
-                })
-                .map(MlsError::UnsupportedGroupExtension)
-                .map_or(Ok(()), Err)?;
-        }
-
-        leaf_node.validate_no_default_values_listed()?;
-
-        #[cfg(feature = "by_ref_proposal")]
-        self.validate_external_senders_ext_credentials(leaf_node)?;
-
-        Ok(())
-    }
 }
 
 impl LeafNode {

@@ -22,6 +22,7 @@ use self::leaf_node::LeafNode;
 
 use crate::client::MlsError;
 use crate::crypto::{self, CipherSuiteProvider, HpkeSecretKey};
+pub use path_secret::GhostShare;
 
 #[cfg(feature = "by_ref_proposal")]
 use crate::group::proposal::{AddProposal, UpdateProposal};
@@ -216,6 +217,18 @@ impl TreeKemPublic {
                 }
             },
         )
+    }
+
+    pub fn find_leaf_node_for_welcome(&self, leaf_node: &LeafNode) -> Option<LeafIndex> {
+        self.nodes.non_empty_leaves().find_map(|(index, node)| {
+            let matches = node.public_key == leaf_node.public_key
+                && node.signing_identity == leaf_node.signing_identity
+                && node.capabilities == leaf_node.capabilities
+                && node.leaf_node_source == leaf_node.leaf_node_source
+                && node.extensions == leaf_node.extensions
+                && node.signature == leaf_node.signature;
+            matches.then_some(index)
+        })
     }
 
     #[cfg(feature = "custom_proposal")]
@@ -550,7 +563,7 @@ impl TreeKemPublic {
                 .key_package
                 .leaf_node
                 .clone();
-
+            
             let res = self
                 .add_leaf(leaf, id_provider, extensions, Some(start))
                 .await;
@@ -1012,6 +1025,7 @@ pub(crate) mod test_utils {
             Some(signing_identity),
             &signature_key,
             Lifetime::years(1, None).unwrap(),
+            0
         )
         .await
         .unwrap();
